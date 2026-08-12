@@ -172,6 +172,7 @@ def build_agent(  # noqa: PLR0915 - one wiring site; splitting it spreads the wi
     browser: Driver | None = None,
     skills: SkillRegistry | None = None,
     proposal_store: ProposalStore | None = None,
+    env: ExecEnvironment | None = None,
     surface: str = "cli",
     emit: EventSink = null_sink,
     approval: ApprovalPolicy | None = None,
@@ -303,11 +304,15 @@ def build_agent(  # noqa: PLR0915 - one wiring site; splitting it spreads the wi
     resolved_tools = tool_registry.resolve(enabled_toolsets=active_toolsets, surface=surface)
 
     policy = approval or ApprovalPolicy(surface=surface)
+    # Injected, or local. The whole point of `ExecEnvironment` is that the tools
+    # do not know which they got -- so this is the one line that decides whether
+    # `terminal` runs on the host or in a container.
+    environment = env if env is not None else LocalEnvironment(workspace)
     context = RunContext(
         session_id=session.id,
         workspace_root=workspace,
-        cwd=PurePath(workspace),
-        env=LocalEnvironment(workspace),
+        cwd=PurePath(environment.root),
+        env=environment,
         cancel=CancelToken(),
         surface=surface,
         emit=emit,

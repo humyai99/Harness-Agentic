@@ -119,6 +119,9 @@ ignore = [
 # starts without pulling in every platform's dependencies.
 "src/harness_agentic/cli/gateway.py" = ["B008", "PLR0913", "PLR0917", "PLC0415"]
 "src/harness_agentic/cli/surfaces.py" = ["B008", "PLR0913", "PLR0917", "PLC0415"]
+# The docker backend shells out and is imported only when `--env docker` is
+# asked for, so a local run never loads it.
+"src/harness_agentic/cli/chat.py" = ["B008", "PLR0913", "PLR0917", "PLC0415"]
 # The single sanctioned place for subprocess: the local execution environment.
 # run_shell() is a deliberate, separately-audited capability -- tools that
 # expose it are classified destructive and go through the approval policy.

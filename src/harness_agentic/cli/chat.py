@@ -26,6 +26,9 @@ from harness_agentic.tools.approval import ApprovalPolicy, Mode
 from harness_agentic.tools.paths import looks_like_secret
 
 if TYPE_CHECKING:
+    from harness_agentic.envs.base import ExecEnvironment
+
+if TYPE_CHECKING:
     from types import FrameType
 
     from harness_agentic.agent.runner import AgentRunner
@@ -80,6 +83,9 @@ def register(app: typer.Typer) -> None:
         model: str = typer.Option(DEFAULT_MODEL, "--model", "-m"),
         toolsets: str = typer.Option("file,terminal", "--toolsets"),
         workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w"),
+        env: str = typer.Option(
+            "local", "--env", help="Where tools run: 'local' on this host, or 'docker'."
+        ),
         stream: bool = typer.Option(default=True, help="Stream the answer as it arrives."),
         thinking: bool = typer.Option(default=False, help="Show the model's reasoning."),
         yes: bool = typer.Option(
@@ -91,7 +97,7 @@ def register(app: typer.Typer) -> None:
         Exit code 0 when the turn completed, 1 otherwise -- so this composes in
         a shell pipeline or a CI step.
         """
-        bundle = _build(model, workspace, toolsets, stream, thinking, approve_all=yes)
+        bundle = _build(model, workspace, toolsets, stream, thinking, approve_all=yes, backend=env)
         try:
             session = bundle.store.latest()
             if session is None:
@@ -111,6 +117,9 @@ def register(app: typer.Typer) -> None:
         model: str = typer.Option(DEFAULT_MODEL, "--model", "-m"),
         toolsets: str = typer.Option("file,terminal", "--toolsets"),
         workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w"),
+        env: str = typer.Option(
+            "local", "--env", help="Where tools run: 'local' on this host, or 'docker'."
+        ),
         stream: bool = typer.Option(default=True, help="Stream answers as they arrive."),
         thinking: bool = typer.Option(default=False, help="Show the model's reasoning."),
         yes: bool = typer.Option(
@@ -118,7 +127,7 @@ def register(app: typer.Typer) -> None:
         ),
     ) -> None:
         """Start an interactive session. Ctrl-D or /exit to leave."""
-        bundle = _build(model, workspace, toolsets, stream, thinking, approve_all=yes)
+        bundle = _build(model, workspace, toolsets, stream, thinking, approve_all=yes, backend=env)
         session = bundle.store.latest()
         if session is None:
             err_console.print("[red]could not create a session[/]")
@@ -157,9 +166,11 @@ def _build(
     thinking: bool,
     *,
     approve_all: bool,
+    backend: str = "local",
 ) -> AgentBundle:
     """Assemble the agent, reporting a missing credential as advice not a stack."""
     profile = ensure_dirs()
+    environment = _environment(backend, workspace.resolve())
     policy = (
         ApprovalPolicy(surface="cli", modes={"cli": Mode.ALLOW})
         if approve_all
@@ -180,7 +191,41 @@ def _build(
             emit=ConsoleRenderer(show_thinking=thinking),
             approval=policy,
             stream=stream,
+            env=environment,
         )
     except CredentialError as exc:
         err_console.print(f"[red]{exc}[/]")
         sys.exit(1)
+
+
+def _environment(backend: str, workspace: Path) -> ExecEnvironment | None:
+    """Build the execution environment named by ``--env``.
+
+    ``None`` means "let build_agent use the local one", which keeps the default
+    path free of any Docker import at all -- the module shells out and should not
+    be loaded for a run that will never use it.
+
+    A missing daemon is reported here rather than on the first tool call, because
+    "the sandbox you asked for is not available" is something to learn before the
+    agent has started doing work you believed was contained.
+    """
+    if backend == "local":
+        return None
+    if backend != "docker":
+        err_console.print(f"[red]unknown --env {backend!r}[/]; use 'local' or 'docker'")
+        sys.exit(1)
+
+    from harness_agentic.envs.docker import DockerEnvironment, DockerUnavailable, probe
+
+    try:
+        version = probe()
+    except DockerUnavailable as exc:
+        err_console.print(f"[red]{exc}[/]")
+        err_console.print(
+            "[dim]Run with --env local to use this host instead, knowing that "
+            "`terminal` is then unsandboxed.[/]"
+        )
+        sys.exit(1)
+    sandbox = DockerEnvironment(workspace=workspace)
+    err_console.print(f"[green]docker {version}[/]: {sandbox.describe()}")
+    return sandbox
