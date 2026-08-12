@@ -7,6 +7,7 @@ each becomes an error result the model can read and react to.
 
 from __future__ import annotations
 
+import stat
 from pathlib import Path, PurePath
 
 import pytest
@@ -436,6 +437,136 @@ def test_terminal_is_gated_on_the_gateway_surface(builtins: ToolRegistry, ctx: _
 
 
 # -- environment ---------------------------------------------------------------
+
+
+def test_output_larger_than_the_pipe_buffer_is_not_a_timeout(tmp_path: Path) -> None:
+    """The bug: the pipes were not drained while waiting for the process.
+
+    Polling ``proc.poll()`` without reading stdout deadlocks as soon as the child
+    writes more than the pipe buffer holds -- 64 KiB on Linux -- and the symptom
+    was worse than a hang. The command was killed at its timeout and reported as
+    having timed out, with output cut off at exactly the buffer size. Every
+    ``terminal`` call carries the loop's cancel token, which is precisely the path
+    that did not drain, so ``pytest -v``, ``git diff`` and any verbose build hit
+    it routinely.
+    """
+    env = LocalEnvironment(tmp_path)
+    size = 200_000  # comfortably past any platform's pipe buffer
+    result = env.run_shell(
+        f"python3 -c \"print('x' * {size})\"",
+        timeout_s=20.0,
+        cancel=CancelToken(),  # a real token: the branch the agent always takes
+    )
+
+    assert not result.timed_out, "a command that finished must not report a timeout"
+    assert result.exit_code == 0
+    assert len(result.stdout) >= size, f"got {len(result.stdout)} of {size} characters"
+
+
+def test_a_command_chatty_on_stderr_also_completes(tmp_path: Path) -> None:
+    # stderr has its own pipe and filled it the same way, so a build that logs
+    # progress to stderr deadlocked even with quiet stdout.
+    env = LocalEnvironment(tmp_path)
+    result = env.run_shell(
+        "python3 -c \"import sys; sys.stderr.write('e' * 200000)\"",
+        timeout_s=20.0,
+        cancel=CancelToken(),
+    )
+
+    assert not result.timed_out
+    assert len(result.stderr) >= 200_000
+
+
+def test_a_flood_of_output_is_bounded_rather_than_held_in_full(tmp_path: Path) -> None:
+    # Draining must not mean accumulating without limit: the deadlock used to cap
+    # memory at 64 KiB by accident, and removing it must not make a command that
+    # prints a gigabyte a memory problem.
+    env = LocalEnvironment(tmp_path)
+    result = env.run_shell(
+        "python3 -c \"print('y' * 5_000_000)\"",
+        timeout_s=20.0,
+        cancel=CancelToken(),
+        max_output_bytes=1_000,
+    )
+
+    assert not result.timed_out
+    assert result.truncated
+    assert len(result.stdout) < 100_000, "the excess should be dropped, not stored"
+
+
+def test_cancelling_is_prompt_and_is_not_reported_as_a_timeout(tmp_path: Path) -> None:
+    import threading
+
+    env = LocalEnvironment(tmp_path)
+    token = CancelToken()
+    threading.Timer(0.3, lambda: token.cancel("the user interrupted")).start()
+
+    result = env.run_shell("sleep 30", timeout_s=60.0, cancel=token)
+
+    assert not result.timed_out, "cancelled is not timed out; they need different messages"
+    assert result.duration_s < 10.0
+    assert result.exit_code != 0
+
+
+def test_a_real_timeout_is_still_a_timeout(tmp_path: Path) -> None:
+    env = LocalEnvironment(tmp_path)
+    result = env.run_shell("sleep 30", timeout_s=1.0, cancel=CancelToken())
+
+    assert result.timed_out
+    assert result.duration_s < 10.0
+
+
+def test_writing_a_file_preserves_its_permissions(tmp_path: Path) -> None:
+    """The bug: write-then-rename carried the temp file's mode to the target.
+
+    Editing a ``0600`` file -- a ``.env``, a private key, an SSH config -- handed
+    it back as ``0644``, readable by every local user. Nothing failed and nothing
+    said so, which is the whole problem with it.
+    """
+    env = LocalEnvironment(tmp_path)
+    secret = tmp_path / "credentials.env"
+    secret.write_text("TOKEN=old\n", encoding="utf-8")
+    secret.chmod(0o600)
+
+    env.write_bytes(PurePath("credentials.env"), b"TOKEN=new\n")
+
+    assert secret.read_bytes() == b"TOKEN=new\n"
+    assert stat.S_IMODE(secret.stat().st_mode) == 0o600, "the file was silently widened"
+
+
+def test_an_executable_file_stays_executable_after_a_write(tmp_path: Path) -> None:
+    # The same mechanism, the other direction: a script that loses its +x is a
+    # script whose next invocation fails for no visible reason.
+    env = LocalEnvironment(tmp_path)
+    script = tmp_path / "deploy.sh"
+    script.write_text("#!/bin/sh\necho old\n", encoding="utf-8")
+    script.chmod(0o755)
+
+    env.write_bytes(PurePath("deploy.sh"), b"#!/bin/sh\necho new\n")
+
+    assert stat.S_IMODE(script.stat().st_mode) == 0o755
+
+
+def test_a_new_file_is_created_without_ceremony(tmp_path: Path) -> None:
+    env = LocalEnvironment(tmp_path)
+    env.write_bytes(PurePath("fresh.txt"), b"hello")
+
+    created = tmp_path / "fresh.txt"
+    assert created.read_bytes() == b"hello"
+    # Readable by its owner at minimum; nothing here should have made it private.
+    assert stat.S_IMODE(created.stat().st_mode) & stat.S_IRUSR
+
+
+def test_a_failed_write_leaves_no_temporary_file(tmp_path: Path) -> None:
+    # Otherwise `.name.harness-tmp` turns up in the next `git status`.
+    env = LocalEnvironment(tmp_path)
+    (tmp_path / "adir").mkdir()
+
+    with pytest.raises(IsADirectoryError):
+        # A directory cannot be replaced by a file, so the rename fails.
+        env.write_bytes(PurePath("adir"), b"nope")
+
+    assert not list(tmp_path.glob(".*harness-tmp")), "a temp file was left behind"
 
 
 def test_symlink_escape_is_refused(tmp_path: Path) -> None:

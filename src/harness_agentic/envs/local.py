@@ -7,13 +7,15 @@ Everything else goes through :class:`~harness_agentic.envs.base.ExecEnvironment`
 
 from __future__ import annotations
 
+import contextlib
 import os
 import signal
 import subprocess
+import threading
 import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePath
-from typing import ClassVar
+from typing import IO, ClassVar
 
 from harness_agentic.core.cancel import NEVER_CANCELLED, CancelToken
 from harness_agentic.envs.base import (
@@ -29,6 +31,38 @@ from harness_agentic.envs.base import (
 from harness_agentic.errors import PathOutsideWorkspace
 
 _POLL_INTERVAL_S = 0.05
+_READ_CHUNK = 65_536
+_DRAIN_JOIN_S = 5.0
+_KEEP_MARGIN = 4_096
+"""Read a little past the output cap so truncation is detectable rather than
+landing exactly on the limit and looking complete."""
+
+
+def _drain(stream: IO[str], into: dict[str, str], key: str, keep: int) -> None:
+    """Read one pipe to EOF on a thread, keeping at most ``keep`` characters.
+
+    Reading continues past the cap rather than stopping, because closing the pipe
+    early sends the child SIGPIPE partway through its own output -- turning a
+    verbose command into a failed one. What is dropped is the excess, not the
+    child. Bounded at all because a command printing a gigabyte should not be
+    held in memory in full before being truncated for display.
+    """
+    parts: list[str] = []
+    kept = 0
+    try:
+        while chunk := stream.read(_READ_CHUNK):
+            if kept < keep:
+                wanted = chunk[: keep - kept]
+                parts.append(wanted)
+                kept += len(wanted)
+    except (OSError, ValueError):
+        # The pipe was closed under us by a kill. Whatever arrived is what there
+        # is, and it is more useful than nothing.
+        pass
+    finally:
+        into[key] = "".join(parts)
+        with contextlib.suppress(OSError):
+            stream.close()
 
 
 class LocalEnvironment(ExecEnvironment):
@@ -153,16 +187,21 @@ class LocalEnvironment(ExecEnvironment):
             start_new_session=hasattr(os, "setsid"),
         )
 
-        timed_out = False
         try:
             if stdin is not None and proc.stdin is not None:
-                proc.stdin.write(stdin)
-                proc.stdin.close()
-            stdout, stderr = self._wait(proc, timeout_s=timeout_s, cancel=cancel)
-        except subprocess.TimeoutExpired:
-            timed_out = True
+                # A child that exited before reading its input is ordinary; its
+                # exit code is the story, not a broken pipe here.
+                with contextlib.suppress(OSError):
+                    proc.stdin.write(stdin)
+                    proc.stdin.close()
+            stdout, stderr, timed_out = self._wait(
+                proc, timeout_s=timeout_s, cancel=cancel, keep=max_output_bytes + _KEEP_MARGIN
+            )
+        except BaseException:
+            # Including KeyboardInterrupt: leaving a process group running after
+            # Ctrl-C is how a killed `harn` leaves a build burning CPU.
             self._kill_tree(proc)
-            stdout, stderr = proc.communicate()
+            raise
 
         out, out_trunc = truncate_output(stdout or "", max_output_bytes)
         err, err_trunc = truncate_output(stderr or "", max_output_bytes)
@@ -176,21 +215,60 @@ class LocalEnvironment(ExecEnvironment):
         )
 
     def _wait(
-        self, proc: subprocess.Popen[str], *, timeout_s: float, cancel: CancelToken
-    ) -> tuple[str, str]:
-        """Wait for the process, polling so cancellation stays responsive."""
-        if cancel is NEVER_CANCELLED:
-            return proc.communicate(timeout=timeout_s)
+        self,
+        proc: subprocess.Popen[str],
+        *,
+        timeout_s: float,
+        cancel: CancelToken,
+        keep: int,
+    ) -> tuple[str, str, bool]:
+        """Wait for the process. Returns ``(stdout, stderr, timed_out)``.
 
+        Both pipes are drained on threads for the whole wait. Polling for exit
+        *without* reading them deadlocks the moment the child writes more than
+        the pipe buffer holds -- 64 KiB on Linux -- and the symptom is worse than
+        a hang: the command is killed at its timeout and reported as having timed
+        out, with its output cut off at exactly the buffer size. ``pytest -v``,
+        ``git diff`` and any verbose build cross that line routinely, so the
+        common case was a command that worked being reported as one that hung.
+
+        One path for both cancellable and not, deliberately. The old fast path
+        used ``communicate(timeout=…)``, which drains correctly, so the drainless
+        branch was the one nothing exercised -- and the only one the agent ever
+        took, since every tool call carries the loop's token.
+        """
+        collected: dict[str, str] = {}
+        readers = [
+            threading.Thread(
+                target=_drain, args=(stream, collected, key, keep), name=f"harn-{key}", daemon=True
+            )
+            for key, stream in (("stdout", proc.stdout), ("stderr", proc.stderr))
+            if stream is not None
+        ]
+        for reader in readers:
+            reader.start()
+
+        timed_out = False
         deadline = time.monotonic() + timeout_s
         while proc.poll() is None:
             if cancel.is_set():
                 self._kill_tree(proc)
                 break
             if time.monotonic() >= deadline:
-                raise subprocess.TimeoutExpired(proc.args, timeout_s)
+                timed_out = True
+                self._kill_tree(proc)
+                break
             time.sleep(_POLL_INTERVAL_S)
-        return proc.communicate()
+
+        # The child is gone either way, so both pipes reach EOF and the readers
+        # finish on their own. Joined so their output is complete before it is
+        # read, and bounded so a grandchild still holding the pipe open -- a
+        # backgrounded process inheriting stdout -- cannot wedge the turn.
+        for reader in readers:
+            reader.join(timeout=_DRAIN_JOIN_S)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=_DRAIN_JOIN_S)
+        return collected.get("stdout", ""), collected.get("stderr", ""), timed_out
 
     @staticmethod
     def _kill_tree(proc: subprocess.Popen[str]) -> None:
@@ -225,15 +303,45 @@ class LocalEnvironment(ExecEnvironment):
         return target.read_bytes()
 
     def write_bytes(self, path: PurePath, data: bytes, *, mkdirs: bool = True) -> None:
-        """Write a file atomically."""
+        """Write a file atomically, preserving its permissions.
+
+        Write-then-rename, so an interrupted write does not leave the model
+        looking at a half-truncated source file next turn. The rename carries the
+        temporary file's mode with it, though, which silently widened every
+        existing file it replaced: editing a ``0600`` file -- a ``.env``, a
+        private key, an SSH config -- handed it back as ``0644``, readable by
+        every local user. Nothing failed and nothing said so.
+
+        So an existing file's mode is read first and restored before the rename,
+        and the temporary file is created private while it holds the data: it sits
+        in the workspace under a predictable name, and its contents may be exactly
+        what the mode was protecting.
+        """
         target = self._resolve(path)
         if mkdirs:
             target.parent.mkdir(parents=True, exist_ok=True)
-        # Write-then-rename: an interrupted write must not leave the model
-        # looking at a half-truncated source file next turn.
+
+        previous: int | None = None
+        with contextlib.suppress(OSError):
+            previous = target.stat().st_mode & 0o7777
+
         tmp = target.with_name(f".{target.name}.harness-tmp")
-        tmp.write_bytes(data)
-        tmp.replace(target)
+        try:
+            if previous is None:
+                # A new file: the usual default, as an ordinary create would give.
+                tmp.write_bytes(data)
+            else:
+                descriptor = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(data)
+                tmp.chmod(previous)
+            tmp.replace(target)
+        except BaseException:
+            # A failed write must not leave `.name.harness-tmp` littering the
+            # user's repository, where it shows up in the next `git status`.
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+            raise
 
     def list_dir(self, path: PurePath) -> list[DirEntry]:
         """List a directory, directories first then names."""
