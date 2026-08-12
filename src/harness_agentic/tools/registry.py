@@ -190,7 +190,17 @@ def _first_param_model(fn: Callable[..., object]) -> type[BaseModel]:
     if not params:
         msg = f"tool {fn.__name__!r} must take (params, ctx)"
         raise ValueError(msg)
-    hints = typing.get_type_hints(fn)
+    try:
+        hints = typing.get_type_hints(fn)
+    except NameError as exc:
+        # With PEP 563 the annotation is a string resolved against module
+        # globals, so a model defined inside a function is invisible here.
+        msg = (
+            f"tool {fn.__name__!r} annotates its parameters with a type that is "
+            f"not resolvable at module level ({exc}); define the parameter model "
+            f"at module scope"
+        )
+        raise TypeError(msg) from exc
     annotation = hints.get(params[0].name)
     if not (isinstance(annotation, type) and issubclass(annotation, BaseModel)):
         msg = (
