@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import typer
 
+from harness_agentic.cli import chat as chat_commands
 from harness_agentic.cli.render import console
 from harness_agentic.constants import active_profile, harness_home
 from harness_agentic.version import __version__
@@ -52,6 +53,9 @@ def doctor() -> None:
     console.print(f"[bold]harness-agentic[/bold] {__version__}")
     console.print(f"home    {harness_home()}")
     console.print(f"profile {active_profile()}")
+
+
+chat_commands.register(app)
 
 
 def main() -> None:

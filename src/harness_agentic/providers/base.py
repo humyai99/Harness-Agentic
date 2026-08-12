@@ -38,6 +38,9 @@ if TYPE_CHECKING:
 WireRequest: TypeAlias = dict[str, Any]
 """A provider-shaped request body, ready to serialize."""
 
+CredentialSource: TypeAlias = Literal["env", "dotenv", "keyring", "config", "explicit", "none"]
+"""Where a credential was found. Reported by `harn doctor`; never the value."""
+
 
 @dataclass(frozen=True, slots=True)
 class ReasoningConfig:
@@ -58,7 +61,7 @@ class Credentials:
 
     base_url: str
     api_key: str | None = None
-    source: Literal["env", "dotenv", "keyring", "config", "explicit", "none"] = "none"
+    source: CredentialSource = "none"
     extra_headers: Mapping[str, str] = field(default_factory=dict)
 
 
