@@ -19,6 +19,7 @@ from harness_agentic.agent.delegate import (
     install_delegate_tool,
 )
 from harness_agentic.agent.runner import AgentRunner, ModelChoice
+from harness_agentic.constants import harness_home
 from harness_agentic.core.cancel import CancelToken
 from harness_agentic.core.clock import Clock, SystemClock
 from harness_agentic.core.events import EventSink, Notice, ToolProgress, null_sink
@@ -36,6 +37,7 @@ from harness_agentic.net.search import from_environment
 from harness_agentic.prompts.builder import (
     PromptBuilder,
     identity_fragment,
+    skills_fragment,
     tool_guidance_fragment,
     volatile_fragment,
     workspace_fragment,
@@ -44,6 +46,7 @@ from harness_agentic.providers.base import CompletionRequest
 from harness_agentic.providers.credentials import SecretResolver
 from harness_agentic.providers.resolver import TransportResolver
 from harness_agentic.session.sqlite_store import SqliteSessionStore
+from harness_agentic.skills.registry import SkillRegistry, default_roots
 from harness_agentic.tools.approval import ApprovalPolicy
 from harness_agentic.tools.builtin import builtin_registry
 from harness_agentic.tools.builtin.browser import install_browser_tools
@@ -53,6 +56,7 @@ from harness_agentic.tools.builtin.data import (
     install_sql_tools,
 )
 from harness_agentic.tools.builtin.session import install_session_tools
+from harness_agentic.tools.builtin.skills import install_skill_tools
 from harness_agentic.tools.builtin.web import install_web_tools
 from harness_agentic.tools.dispatch import ToolExecutor
 from harness_agentic.tools.registry import ToolRegistry
@@ -67,6 +71,7 @@ if TYPE_CHECKING:
     from harness_agentic.net.search import SearchProvider
     from harness_agentic.providers.base import ProviderTransport
     from harness_agentic.session.store import SessionStore
+    from harness_agentic.skills.proposals import ProposalStore
     from harness_agentic.tools.registry import ToolRegistry
     from harness_agentic.tools.spec import ApprovalRequest
 
@@ -133,7 +138,25 @@ class AgentBundle:
     the agent goes away is a leak the operator finds with `ps`."""
 
 
-def build_agent(
+def default_library(workspace: Path) -> SkillRegistry:
+    """The standard skill roots: bundled, then user, then this project's.
+
+    Later wins on a name collision, which is the ordering people already expect
+    from ``git config`` and ``.gitignore``: the repository's own version of a
+    procedure beats the one in your home directory, and both beat the bundled
+    one. The loser is recorded as shadowed rather than dropped so ``harn skills
+    doctor`` can explain why the file someone edited is not the one in use.
+    """
+    return SkillRegistry(
+        default_roots(
+            builtin=Path(__file__).parent.parent / "skills" / "bundled",
+            user=harness_home() / "skills",
+            project=workspace / ".harness" / "skills",
+        )
+    )
+
+
+def build_agent(  # noqa: PLR0915 - one wiring site; splitting it spreads the wiring
     *,
     model: str,
     workspace: Path,
@@ -147,6 +170,8 @@ def build_agent(
     delegation: DelegationLimits | None = None,
     mcp_servers: Sequence[ServerConfig] = (),
     browser: Driver | None = None,
+    skills: SkillRegistry | None = None,
+    proposal_store: ProposalStore | None = None,
     surface: str = "cli",
     emit: EventSink = null_sink,
     approval: ApprovalPolicy | None = None,
@@ -201,6 +226,34 @@ def build_agent(
     if browser is not None:
         install_browser_tools(tool_registry, browser)
 
+    # Created here rather than after the tools, because the skill tools need the
+    # session id to record which conversation a proposal came out of.
+    session = store.create(source=surface, cwd=workspace, model=chain[0].model)
+
+    # The executor holds the taint flag and does not exist yet. A one-slot holder
+    # filled in below is what lets `skill_propose` read the flag as it stands at
+    # call time: a proposal filed after a web fetch in the same turn is tainted,
+    # even though nothing was tainted when the tools were wired.
+    executor_slot: list[ToolExecutor] = []
+
+    def session_is_tainted() -> bool:
+        return bool(executor_slot and executor_slot[0].tainted)
+
+    skill_library: SkillRegistry | None = None
+    if "skill" in toolsets:
+        skill_library = skills if skills is not None else default_library(workspace)
+        skill_library.refresh()
+        install_skill_tools(
+            tool_registry,
+            skill_library,
+            # Without a place to review proposals there is no `skill_propose`: a
+            # queue nobody can read is the same as no queue, and the model would
+            # keep filing into it.
+            proposals=proposal_store,
+            session_id=session.id,
+            tainted=session_is_tainted,
+        )
+
     bridge: McpBridge | None = None
     if mcp_servers:
         # Connected before the toolsets are resolved, because each server
@@ -248,7 +301,6 @@ def build_agent(
     # guess at anything compaction summarized away.
     active_toolsets = list(dict.fromkeys(["core", *toolsets, *mcp_toolsets]))
     resolved_tools = tool_registry.resolve(enabled_toolsets=active_toolsets, surface=surface)
-    session = store.create(source=surface, cwd=workspace, model=chain[0].model)
 
     policy = approval or ApprovalPolicy(surface=surface)
     context = RunContext(
@@ -271,6 +323,17 @@ def build_agent(
             volatile_fragment(now=the_clock.now().isoformat(timespec="seconds"), cwd=str(workspace))
         )
     )
+    if skill_library is not None:
+        # A frozen snapshot: taken once here and never regenerated, so it stays
+        # byte-identical inside the cached prefix for the life of the session.
+        catalog = skill_library.catalog(tool.name for tool in resolved_tools)
+        if catalog.text.strip():
+            prompts.add(skills_fragment(catalog.text))
+            emit(Notice("info", f"skills: {len(catalog.included)} in the catalog"))
+        for problem in skill_library.problems():
+            # Reported, not swallowed. A malformed skill that vanishes silently is
+            # how a library rots without anyone noticing.
+            emit(Notice("warning", f"skill at {problem.path} did not load"))
 
     # Summarize with the cheapest model in the chain rather than the primary:
     # compaction happens on the longest conversations, which is exactly when
@@ -293,6 +356,7 @@ def build_agent(
         return summary_choice.transport.send(request).message.text()
 
     executor = ToolExecutor(tool_registry, approval=policy, emit=emit)
+    executor_slot.append(executor)
     primary = resolver.resolve(model)
     runner = AgentRunner(
         chain=chain,

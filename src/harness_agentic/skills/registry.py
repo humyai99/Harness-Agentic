@@ -193,13 +193,30 @@ class SkillRegistry:
             raise SkillError(msg)
 
         parsed = parse_file(meta.path / SKILL_FILE)
-        resources = tuple(
-            str(p.relative_to(meta.path))
-            for p in sorted(meta.path.rglob("*"))
-            if p.is_file() and p.name != SKILL_FILE and SIDECAR_DIR not in p.parts
-        )
         self._bump(meta, "loads")
-        return Skill(meta=meta, body=parsed.body, resources=resources)
+        return Skill(meta=meta, body=parsed.body, resources=self._resources_of(meta.path))
+
+    @staticmethod
+    def _resources_of(directory: Path) -> tuple[str, ...]:
+        """The bundled files a skill ships, as skill-relative paths.
+
+        The sidecar is excluded by inspecting the *relative* path. Testing the
+        absolute one against ``.harness`` matched the containing directory rather
+        than the sidecar: every skill under ``<project>/.harness/skills/`` or
+        ``~/.harness/skills/`` has that component in its absolute path, so every
+        file was filtered out and no skill ever reported shipping anything. Level
+        2 disclosure was dead everywhere except the bundled directory, which is
+        the one root whose path happens not to contain it.
+        """
+        found: list[str] = []
+        for path in sorted(directory.rglob("*")):
+            if not path.is_file() or path.name == SKILL_FILE:
+                continue
+            relative = path.relative_to(directory)
+            if SIDECAR_DIR in relative.parts:
+                continue
+            found.append(str(relative))
+        return tuple(found)
 
     def read_resource(
         self, name: str, relative: str, *, offset: int = 0, limit: int = 2_000
@@ -209,6 +226,11 @@ class SkillRegistry:
         The path is resolved and confirmed to be inside the skill directory
         before anything is read: a skill from a hub is untrusted content, and
         ``../../.ssh/id_rsa`` is the obvious thing to try.
+
+        The sidecar is refused as well. It holds provenance and usage counters --
+        this machine's bookkeeping rather than part of the portable skill -- and
+        it is deliberately absent from the resource listing, so a request for it
+        did not come from following that listing.
         """
         meta = self._skills.get(name)
         if meta is None:
@@ -218,6 +240,9 @@ class SkillRegistry:
         root = meta.path.resolve()
         if root not in target.parents and target != root:
             msg = f"{relative!r} resolves outside the skill directory"
+            raise SkillError(msg)
+        if SIDECAR_DIR in target.relative_to(root).parts:
+            msg = f"{relative!r} is the skill's sidecar, not part of the skill"
             raise SkillError(msg)
         if not target.is_file():
             msg = f"{name}/{relative} does not exist"

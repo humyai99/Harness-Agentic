@@ -268,6 +268,45 @@ def test_reading_a_resource_cannot_escape_the_skill_directory(user_root: Path) -
         registry.read_resource("alpha", "../../../etc/passwd")
 
 
+def test_resources_are_listed_for_a_skill_living_under_a_dot_harness_root(
+    tmp_path: Path,
+) -> None:
+    """The bug: the sidecar filter tested the *absolute* path's parts.
+
+    ``.harness`` matched the containing directory rather than the sidecar, and
+    every real root has that component -- ``<project>/.harness/skills/`` and
+    ``~/.harness/skills/`` both. So every bundled file was filtered out and no
+    skill ever reported shipping anything, which made level-2 disclosure dead
+    everywhere except the bundled directory, the one root whose path happens not
+    to contain it.
+    """
+    root = tmp_path / "project" / ".harness" / "skills"
+    skill = _skill(root, "demo", files={"references/runbook.md": "the details\n"})
+    # The sidecar, which must stay out of the listing.
+    (skill / ".harness").mkdir(exist_ok=True)
+    (skill / ".harness" / "stats.json").write_text("{}", encoding="utf-8")
+
+    registry = _registry(SkillRoot(root, TrustLevel.PROJECT))
+    loaded = registry.load("demo")
+
+    assert "references/runbook.md" in loaded.resources
+    assert not any(".harness" in name for name in loaded.resources), "the sidecar is not content"
+    assert registry.read_resource("demo", "references/runbook.md").strip() == "the details"
+
+
+def test_the_sidecar_cannot_be_read_as_a_resource(tmp_path: Path) -> None:
+    # It is this machine's bookkeeping, and it is absent from the listing -- so a
+    # request for it did not come from following that listing.
+    root = tmp_path / ".harness" / "skills"
+    skill = _skill(root, "demo")
+    (skill / ".harness").mkdir(exist_ok=True)
+    (skill / ".harness" / "stats.json").write_text('{"loads": 3}', encoding="utf-8")
+
+    registry = _registry(SkillRoot(root, TrustLevel.USER))
+    with pytest.raises(SkillError, match="sidecar"):
+        registry.read_resource("demo", ".harness/stats.json")
+
+
 def test_a_quarantined_skill_cannot_be_loaded(user_root: Path) -> None:
     directory = _skill(user_root, "suspicious")
     sidecar = directory / ".harness"
@@ -526,6 +565,77 @@ def test_cases_are_parsed() -> None:
     )
     assert [c.id for c in cases] == ["positive", "negative"]
     assert cases[1].expect_selected is False
+
+
+def test_cases_written_one_per_line_are_parsed() -> None:
+    """The bug: flow mappings were not understood, so these parsed to nothing.
+
+    ``- {id: p, prompt: ...}`` read as a single key named ``{id`` with the rest as
+    its value, so the entry had no ``prompt`` and was silently dropped. That is
+    the style the documentation uses -- the whole point of it is that one case
+    fits on one line -- so a correctly written cases file produced zero cases,
+    and the catalog audit then reported no collisions because it had nothing to
+    check.
+    """
+    cases = parse_cases(
+        textwrap.dedent("""\
+            cases:
+              - {id: positive, prompt: "push the staging deploy", expect_selected: true}
+              - {id: negative, prompt: "cut a production release", expect_selected: false}
+            """)
+    )
+    assert [c.id for c in cases] == ["positive", "negative"]
+    assert cases[0].expect_selected is True
+    assert cases[1].expect_selected is False
+    assert cases[0].prompt == "push the staging deploy"
+
+
+def test_a_comma_inside_a_quoted_prompt_does_not_split_the_case() -> None:
+    # A prompt legitimately contains a comma, and splitting on it would turn one
+    # real case into two malformed halves.
+    cases = parse_cases('cases:\n  - {id: p, prompt: "deploy, then verify the rollout"}\n')
+    assert len(cases) == 1
+    assert cases[0].prompt == "deploy, then verify the rollout"
+
+
+def test_a_flow_sequence_is_not_mistaken_for_a_mapping() -> None:
+    from harness_agentic.skills.frontmatter import parse_frontmatter
+
+    assert parse_frontmatter("platforms:\n  - linux\n  - macos\n") == {
+        "platforms": ["linux", "macos"]
+    }
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "cases:\n  - id: p\n    tier: routing\n",  # no prompt
+        "cases:\n  - just a string\n",
+        "notcases:\n  - {id: p, prompt: x}\n",
+    ],
+)
+def test_an_unusable_case_is_an_error_rather_than_a_silent_skip(raw: str) -> None:
+    """A file that reads as empty is worse than no file at all.
+
+    Dropped quietly, the file is present, the validator's "has tests" check
+    passes, and the audit reports clean because it had nothing to check.
+    """
+    with pytest.raises((ValueError, TypeError), match=r"cases|prompt"):
+        parse_cases(raw)
+
+
+def test_a_candidate_whose_cases_parse_to_nothing_is_blocked() -> None:
+    # The gate has to be where saying so is still useful, which is before the
+    # skill lands rather than when somebody wonders why the audit is quiet.
+    report = validate(
+        CandidateSkill(
+            name="demo",
+            content=_candidate().content,
+            tests_yaml="cases:\n  - id: p\n    tier: routing\n",
+        )
+    )
+    assert report.blocked
+    assert any(f.code == "SK037" for f in report.findings), report.summary()
 
 
 def test_the_audit_is_clean_for_well_separated_skills(user_root: Path) -> None:

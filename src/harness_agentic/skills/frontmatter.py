@@ -86,7 +86,7 @@ def split_frontmatter(raw: str) -> tuple[str, str]:
     raise SkillValidationError(msg)
 
 
-def parse_frontmatter(raw: str) -> dict[str, Any]:  # noqa: PLR0912
+def parse_frontmatter(raw: str) -> dict[str, Any]:  # noqa: PLR0912, PLR0915
     """Parse the subset of YAML a skill's frontmatter is allowed to use.
 
     Scalars, block and inline lists, nested maps by indentation, and folded or
@@ -126,6 +126,15 @@ def parse_frontmatter(raw: str) -> dict[str, Any]:  # noqa: PLR0912
         if stripped.startswith("- "):
             container = frame.become(list)
             item = stripped[2:].strip()
+            if (flow := _flow_mapping(item)) is not None:
+                # `- {id: p, tier: routing, prompt: ...}` on one line. Without
+                # this, the whole item was read as a single key named `{id` and
+                # the rest as its value -- so a `tests/cases.yaml` written in the
+                # documented style parsed to nothing at all, silently, and the
+                # catalog audit then reported no collisions because it had no
+                # cases to check.
+                container.append(flow)
+                continue
             if ":" in item and not _is_quoted(item):
                 child: dict[str, Any] = {}
                 container.append(child)
@@ -192,6 +201,60 @@ class _Folded(list):  # type: ignore[type-arg]
 def _is_quoted(text: str) -> bool:
     """Whether a list item is a quoted string rather than an inline mapping."""
     return len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'"  # noqa: PLR2004
+
+
+def _flow_mapping(text: str) -> dict[str, Any] | None:
+    """Parse ``{k: v, k: v}`` into a mapping, or ``None`` if it is not one.
+
+    One level, which is all the frontmatter dialect needs: this exists for the
+    ``cases:`` entries in a skill's test file, where the whole point of the flow
+    style is that one case fits on one line.
+
+    Commas inside quotes do not split, because a case prompt legitimately
+    contains one -- and getting that wrong would have turned a real prompt into
+    two malformed halves.
+    """
+    if not (text.startswith("{") and text.endswith("}")):
+        return None
+    inner = text[1:-1].strip()
+    if not inner:
+        return {}
+
+    parts: list[str] = []
+    depth = 0
+    quote = ""
+    current: list[str] = []
+    for char in inner:
+        if quote:
+            if char == quote:
+                quote = ""
+            current.append(char)
+            continue
+        if char in "\"'":
+            quote = char
+            current.append(char)
+            continue
+        if char in "[{":
+            depth += 1
+        elif char in "]}":
+            depth -= 1
+        if char == "," and depth == 0:
+            parts.append("".join(current))
+            current = []
+            continue
+        current.append(char)
+    parts.append("".join(current))
+
+    mapping: dict[str, Any] = {}
+    for part in parts:
+        key, separator, value = part.partition(":")
+        if not separator:
+            # Not a mapping after all -- a flow *sequence*, or something this
+            # dialect does not accept. Fall through to the caller's other cases
+            # rather than inventing a key.
+            return None
+        mapping[key.strip()] = _scalar(value.strip())
+    return mapping
 
 
 def _finalize(node: Any) -> Any:

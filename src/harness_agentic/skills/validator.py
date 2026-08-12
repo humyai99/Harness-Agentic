@@ -174,19 +174,46 @@ def _check_structure(body: str, candidate: CandidateSkill) -> list[Finding]:
         findings.append(Finding("SK033", "error", f"more than {MAX_SCRIPTS} bundled files"))
     if sum(len(c) for _, c in candidate.files) > MAX_DIR_BYTES:
         findings.append(Finding("SK034", "error", "bundled files exceed 256 KiB"))
-    if not candidate.tests_yaml.strip():
-        findings.append(
+    findings.extend(_check_cases(candidate.tests_yaml))
+    for path, _ in candidate.files:
+        if ".." in path or path.startswith("/"):
+            findings.append(Finding("SK036", "error", f"bundled path escapes the skill: {path}"))
+    return findings
+
+
+def _check_cases(tests_yaml: str) -> list[Finding]:
+    """Require routing cases that actually parse into cases.
+
+    Checking only that the string is non-empty let a skill ship a test file that
+    parsed to nothing -- which is worse than shipping none, because the audit
+    then reports no collisions and everyone believes the library is checked. The
+    cases have to be readable here, at the gate, where saying so is still useful.
+    """
+    from harness_agentic.skills.testing import parse_cases  # noqa: PLC0415 - cycle
+
+    if not tests_yaml.strip():
+        return [
             Finding(
                 "SK035",
                 "error",
                 "no tests/cases.yaml; a skill without routing cases cannot be "
                 "checked against the rest of the library",
             )
-        )
-    for path, _ in candidate.files:
-        if ".." in path or path.startswith("/"):
-            findings.append(Finding("SK036", "error", f"bundled path escapes the skill: {path}"))
-    return findings
+        ]
+    try:
+        cases = parse_cases(tests_yaml)
+    except Exception as exc:  # a parse failure is one finding, not a crash
+        return [Finding("SK037", "error", f"tests/cases.yaml does not parse: {exc}")]
+    if not cases:
+        return [
+            Finding(
+                "SK037",
+                "error",
+                "tests/cases.yaml parsed to zero cases; a file that reads as empty "
+                "is worse than none, because the catalog audit then reports clean",
+            )
+        ]
+    return []
 
 
 def _scan_secrets(candidate: CandidateSkill) -> tuple[list[Finding], Severity]:

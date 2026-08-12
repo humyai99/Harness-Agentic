@@ -87,6 +87,13 @@ def install_builtins(target: ToolRegistry | None = None) -> ToolRegistry:
     )
     reg.define_toolset(
         Toolset(
+            name="skill",
+            description="Look up and follow written procedures, and propose new ones.",
+            tools=("skill_search", "skill_load", "skill_read", "skill_propose"),
+        )
+    )
+    reg.define_toolset(
+        Toolset(
             name="terminal",
             description="Run commands. Requires approval on every surface.",
             tools=("terminal",),

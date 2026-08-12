@@ -149,17 +149,29 @@ Router = Callable[[str, Sequence[SkillMeta]], str | None]
 
 
 def parse_cases(raw: str) -> list[TestCase]:
-    """Read a ``tests/cases.yaml``."""
+    """Read a ``tests/cases.yaml``.
+
+    An entry that cannot be used is an error rather than a silent skip. Dropping
+    it quietly is how a skill ships tests that do nothing: the file is present,
+    the validator's "has tests" check passes, and the catalog audit then reports
+    no collisions because it had nothing to check. A test suite that is empty for
+    a reason nobody is told is worse than no test suite.
+    """
     if not raw.strip():
         return []
     parsed = parse_frontmatter(raw)
     entries = parsed.get("cases")
+    if entries is None:
+        msg = "no 'cases:' key -- a cases file needs a list of cases under it"
+        raise ValueError(msg)
     if not isinstance(entries, list):
-        return []
+        msg = f"'cases:' should be a list, got {type(entries).__name__}"
+        raise TypeError(msg)
     cases: list[TestCase] = []
     for index, entry in enumerate(entries):
         if not isinstance(entry, dict) or not entry.get("prompt"):
-            continue
+            msg = f"case {index + 1} has no usable 'prompt': {entry!r}"
+            raise ValueError(msg)
         tier_raw = str(entry.get("tier", "routing"))
         cases.append(
             TestCase(

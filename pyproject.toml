@@ -114,7 +114,7 @@ ignore = [
 "scripts/**" = ["T20", "INP001", "D1"]
 # Typer's API *is* calls-in-defaults, and a CLI command legitimately takes many
 # flags. Fighting the framework here would make the commands harder to read.
-"src/harness_agentic/cli/**" = ["B008", "PLR0913", "PLR0917"]
+"src/harness_agentic/cli/**" = ["B008", "PLR0913", "PLR0917", "PLR0915"]
 # Adapter builders import their platform module on demand, so `harn`
 # starts without pulling in every platform's dependencies.
 "src/harness_agentic/cli/gateway.py" = ["B008", "PLR0913", "PLR0917", "PLC0415"]

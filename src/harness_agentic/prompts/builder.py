@@ -208,6 +208,20 @@ def tool_guidance_fragment(tools: Sequence[ToolSchema]) -> PromptFragment:
     )
 
 
+def skills_fragment(catalog: str) -> PromptFragment:
+    """The level-0 skills catalog: names and descriptions, nothing more.
+
+    ``KNOWLEDGE`` rather than ``CONTEXT`` or ``VOLATILE``, and taken once at
+    session start. The catalog is the single largest cacheable block after the
+    tool list, and regenerating it per turn would cost more than the catalog
+    itself -- so a skill created mid-session is announced in a tool result and
+    joins the catalog at the next session. That is a real cost, paid knowingly,
+    and ``skill_propose`` says so in its answer rather than leaving the model to
+    wonder why the skill it just wrote is not listed.
+    """
+    return PromptFragment(key="skills", tier=Tier.KNOWLEDGE, text=catalog, order=10)
+
+
 def workspace_fragment(root: str, *, notes: str = "") -> PromptFragment:
     """Facts about the workspace that hold for the whole session."""
     body = f"## Workspace\n\nThe workspace root is `{root}`."
