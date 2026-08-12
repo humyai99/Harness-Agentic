@@ -47,6 +47,20 @@ def install_builtins(target: ToolRegistry | None = None) -> ToolRegistry:
     )
     reg.define_toolset(
         Toolset(
+            name="data",
+            description="Read a database, and call allowlisted HTTP APIs.",
+            tools=("sql_schema", "sql_query", "http_request"),
+        )
+    )
+    reg.define_toolset(
+        Toolset(
+            name="retrieval",
+            description="Search the knowledge base for passages to answer from.",
+            tools=("kb_search",),
+        )
+    )
+    reg.define_toolset(
+        Toolset(
             name="terminal",
             description="Run commands. Requires approval on every surface.",
             tools=("terminal",),

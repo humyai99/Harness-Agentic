@@ -22,6 +22,7 @@ can run one is an agent that eventually does at 3am.
 
 from __future__ import annotations
 
+import itertools
 import re
 import sqlite3
 from collections.abc import Sequence
@@ -33,8 +34,10 @@ MAX_ROWS = 200
 MAX_CELL_CHARS = 500
 """One base64 blob in one cell should not consume the context window."""
 
-READ_ONLY_STARTS = frozenset({"select", "with", "explain", "values", "table"})
-"""Statements that only read. ``table`` covers SQLite's ``TABLE t`` shorthand."""
+READ_ONLY_STARTS = frozenset({"select", "with", "explain", "values", "table", "pragma"})
+"""Statements that may only read. ``table`` covers SQLite's ``TABLE t``
+shorthand; ``pragma`` is admitted here so it reaches the narrower introspection
+check below and gets a message that says what is actually wrong."""
 
 FORBIDDEN = frozenset(
     {
@@ -49,12 +52,25 @@ FORBIDDEN = frozenset(
 A ``WITH x AS (DELETE ... RETURNING *) SELECT * FROM x`` reads as a SELECT to
 anything that only inspects the first token, and on PostgreSQL it deletes rows."""
 
-SENSITIVE_COLUMN = re.compile(
-    r"pass(word|wd|hash)?$|secret|token|api[_-]?key|private[_-]?key|credential"
-    r"|session[_-]?id|ssn|card[_-]?number|cvv|auth",
-    re.IGNORECASE,
-)
-"""Column names whose values must not reach the model or the transcript."""
+SENSITIVE_TOKENS = frozenset(
+    {
+        "password", "passwd", "passphrase", "pass", "secret", "token", "apikey",
+        "privatekey", "credential", "credentials", "cvv", "ssn", "pin", "otp",
+        "salt", "hash", "auth", "authorization", "bearer", "cookie", "session",
+    }
+)  # fmt: skip
+"""Name parts whose values must not reach the model or the transcript.
+
+Matched against the *parts* of a column name rather than as substrings, which is
+what makes `password_hash` sensitive and `author` not. An anchored regex misses
+the first; a substring search wrongly catches the second, and a masked byline
+is the kind of false positive that gets masking switched off entirely."""
+
+SENSITIVE_PAIRS = frozenset({("api", "key"), ("private", "key"), ("secret", "key")})
+"""Adjacent parts that are sensitive together but innocuous apart: `key` alone
+is usually a primary key."""
+
+_SPLIT = re.compile(r"[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])")
 
 MASK = "<redacted:{column}>"
 _COMMENTS = re.compile(r"--[^\n]*|/\*.*?\*/", re.DOTALL)
@@ -148,6 +164,14 @@ def assert_read_only(sql: str) -> str:
     return stripped
 
 
+def is_sensitive(column: str) -> bool:
+    """Whether a column's values must be withheld from the model."""
+    parts = [part.lower() for part in _SPLIT.split(column) if part]
+    if any(part in SENSITIVE_TOKENS for part in parts):
+        return True
+    return any(pair in SENSITIVE_PAIRS for pair in itertools.pairwise(parts))
+
+
 def mask_row(
     columns: Sequence[str], values: Sequence[Any], *, max_chars: int = MAX_CELL_CHARS
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -155,7 +179,7 @@ def mask_row(
     cells: list[str] = []
     masked: list[str] = []
     for name, value in zip(columns, values, strict=False):
-        if SENSITIVE_COLUMN.search(name):
+        if is_sensitive(name):
             cells.append(MASK.format(column=name))
             masked.append(name)
             continue

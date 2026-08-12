@@ -40,12 +40,19 @@ from harness_agentic.providers.resolver import TransportResolver
 from harness_agentic.session.sqlite_store import SqliteSessionStore
 from harness_agentic.tools.approval import ApprovalPolicy
 from harness_agentic.tools.builtin import install_builtins
+from harness_agentic.tools.builtin.data import (
+    install_http_tools,
+    install_kb_tools,
+    install_sql_tools,
+)
 from harness_agentic.tools.builtin.session import install_session_tools
 from harness_agentic.tools.builtin.web import install_web_tools
 from harness_agentic.tools.dispatch import ToolExecutor
 from harness_agentic.tools.registry import ToolRegistry, registry
 
 if TYPE_CHECKING:
+    from harness_agentic.data.kb import Retriever
+    from harness_agentic.data.sql import SqlSource
     from harness_agentic.envs.base import ExecEnvironment
     from harness_agentic.net.fetch import Fetcher
     from harness_agentic.net.search import SearchProvider
@@ -120,6 +127,9 @@ def build_agent(
     toolsets: Sequence[str] = ("file", "terminal"),
     fetcher: Fetcher | None = None,
     search: SearchProvider | None = None,
+    sql_source: SqlSource | None = None,
+    retriever: Retriever | None = None,
+    http_fetcher: Fetcher | None = None,
     surface: str = "cli",
     emit: EventSink = null_sink,
     approval: ApprovalPolicy | None = None,
@@ -133,6 +143,13 @@ def build_agent(
 
     ``transports`` lets a caller inject one -- which is how the whole stack is
     exercised in tests with ``FakeTransport`` and no API key.
+
+    The ``data`` and ``retrieval`` tools appear only when the thing they read
+    from is supplied: no ``sql_query`` without a ``sql_source``, no ``kb_search``
+    without a ``retriever``, no ``http_request`` without an ``http_fetcher``.
+    That last one is separate from ``fetcher`` on purpose -- ``web_fetch`` wants
+    a broad policy with an internal-range denylist, and ``http_request`` wants a
+    narrow one with a host allowlist, because it can change what it calls.
     """
     the_clock = clock or SystemClock()
     resolver = TransportResolver(clock=the_clock, overrides=transports)
@@ -158,6 +175,12 @@ def build_agent(
             fetcher or HttpFetcher(),
             search=search or from_environment(SecretResolver(), fetcher or HttpFetcher()),
         )
+    if sql_source is not None:
+        install_sql_tools(tool_registry, sql_source)
+    if retriever is not None:
+        install_kb_tools(tool_registry, retriever)
+    if http_fetcher is not None:
+        install_http_tools(tool_registry, http_fetcher)
 
     # `core` is always on: an agent that cannot reach its own history has to
     # guess at anything compaction summarized away.
