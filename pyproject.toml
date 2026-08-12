@@ -92,13 +92,20 @@ ignore = [
   # RateLimited(...)` and `except ContextOverflow` say what happened. The base
   # class is HarnessError, so the hierarchy is still obvious.
   "N818",
+  # TC001/TC002 still apply. TC003 only defers *stdlib* imports, which are
+  # already loaded by the time we run, so it buys nothing and costs a
+  # TYPE_CHECKING block in every module -- one that silently breaks the day a
+  # dataclass here becomes a pydantic model.
+  "TC003",
 ]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S603", "D1", "ANN", "PLR2004", "ARG", "INP001", "TC"]
 "scripts/**" = ["T20", "INP001", "D1"]
 # The single sanctioned place for subprocess: the local execution environment.
-"src/harness_agentic/envs/local.py" = ["S603", "S607"]
+# run_shell() is a deliberate, separately-audited capability -- tools that
+# expose it are classified destructive and go through the approval policy.
+"src/harness_agentic/envs/local.py" = ["S603", "S604", "S607"]
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"
