@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, ClassVar
 
 from harness_agentic.core.cancel import NEVER_CANCELLED, CancelToken
@@ -61,7 +61,14 @@ class ScriptedTurn:
     tool_calls: tuple[tuple[str, Mapping[str, Any]], ...] = ()
     finish_reason: FinishReason | None = None
     """Inferred from ``tool_calls`` when omitted."""
-    usage: Usage = field(default_factory=lambda: Usage(input_tokens=100, output_tokens=20))
+    usage: Usage | None = None
+    """Leave unset to have usage derived from the actual request size.
+
+    A fake that reports a flat 100 input tokens for a 40,000-character prompt
+    teaches the token budget something false, and the budget then calibrates
+    itself into never compacting. Same failure as any other way the fake can
+    diverge from a real provider: it makes the tests that depend on it lie.
+    """
     raises: Exception | None = None
     """Raised instead of answering -- for exercising retry and fallback."""
     text_chunks: Sequence[str] | None = None
@@ -132,6 +139,7 @@ class FakeTransport(ProviderTransport):
         self.seen_messages: list[tuple[Message, ...]] = []
         self.seen_systems: list[SystemPrompt] = []
         self.seen_tools: list[tuple[ToolSchema, ...]] = []
+        self._pending_usage = Usage()
 
     # -- script control -----------------------------------------------------
 
@@ -149,6 +157,27 @@ class FakeTransport(ProviderTransport):
         """How many scripted turns are unused."""
         return max(0, len(self._script) - self._index)
 
+    @staticmethod
+    def _usage_for(turn: ScriptedTurn, request: CompletionRequest) -> Usage:
+        """Report plausible usage when the script did not pin it."""
+        if turn.usage is not None:
+            return turn.usage
+        from harness_agentic.memory.budget import (  # noqa: PLC0415  -- avoids a cycle
+            estimate_message,
+            estimate_tokens,
+            estimate_tools,
+        )
+
+        produced = (turn.text or "") + (turn.thinking or "")
+        return Usage(
+            input_tokens=(
+                estimate_tokens(request.system.rendered())
+                + estimate_tools(request.tools)
+                + sum(estimate_message(m) for m in request.messages)
+            ),
+            output_tokens=max(1, estimate_tokens(produced)),
+        )
+
     def _next(self, request: CompletionRequest) -> ScriptedTurn:
         self.requests.append(request)
         self.seen_messages.append(request.messages)
@@ -165,6 +194,7 @@ class FakeTransport(ProviderTransport):
         self._index += 1
         if turn.raises is not None:
             raise turn.raises
+        self._pending_usage = self._usage_for(turn, request)
         return turn
 
     # -- conversion ---------------------------------------------------------
@@ -293,7 +323,7 @@ class FakeTransport(ProviderTransport):
             events.append(ToolUseArgsDelta(index=position, fragment=payload))
             events.append(BlockStop(index=position))
 
-        events.append(UsageUpdate(turn.usage))
+        events.append(UsageUpdate(turn.usage or self._pending_usage))
         events.append(StreamDone(finish_reason=turn.resolved_finish(), model=self._model))
         return events
 

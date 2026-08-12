@@ -33,6 +33,22 @@ from harness_agentic.session.serde import (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class SearchHit:
+    """One match from a history search.
+
+    Richer than returning whole messages: a hit is shown as a snippet with its
+    position, and loading the full message only matters once someone asks for
+    it.
+    """
+
+    session_id: str
+    seq: int
+    role: str
+    snippet: str
+    created_at: datetime
+
+
 @dataclass(slots=True)
 class SessionRecord:
     """Metadata for one conversation."""
@@ -98,8 +114,10 @@ class SessionStore(Protocol):
         """Every visible message, in order."""
         ...
 
-    def search(self, query: str, *, limit: int = 20) -> list[tuple[str, Message]]:
-        """Find past messages. Naive here; FTS5 replaces it."""
+    def search(
+        self, query: str, *, session_id: str | None = None, limit: int = 20
+    ) -> list[SearchHit]:
+        """Find past messages."""
         ...
 
     @contextmanager
@@ -276,18 +294,32 @@ class JsonlSessionStore:
                 total = total + usage_from_json(payload["usage"])
         return total
 
-    def search(self, query: str, *, limit: int = 20) -> list[tuple[str, Message]]:
+    def search(
+        self, query: str, *, session_id: str | None = None, limit: int = 20
+    ) -> list[SearchHit]:
         """Substring search across transcripts.
 
-        Deliberately naive. FTS5 arrives with the SQLite store; the Protocol is
-        what matters now, so the loop does not have to change when it does.
+        Deliberately naive; the SQLite store does this properly with FTS5. It
+        exists so the Protocol has two implementations from the start, which is
+        what keeps the Protocol honest.
         """
         needle = query.lower()
-        hits: list[tuple[str, Message]] = []
+        hits: list[SearchHit] = []
         for record in self.recent(limit=200):
-            for message in self.history(record.id):
-                if needle in message.text().lower():
-                    hits.append((record.id, message))
+            if session_id is not None and record.id != session_id:
+                continue
+            for seq, message in enumerate(self.history(record.id)):
+                text = message.text()
+                if needle in text.lower():
+                    hits.append(
+                        SearchHit(
+                            session_id=record.id,
+                            seq=seq,
+                            role=message.role,
+                            snippet=text[:200],
+                            created_at=message.created_at,
+                        )
+                    )
                     if len(hits) >= limit:
                         return hits
         return hits

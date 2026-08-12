@@ -8,11 +8,11 @@ nothing says why. It also hides every tool from mypy. Autodiscovery stays for
 Importing this module registers everything into the process-wide registry.
 """
 
-from harness_agentic.tools.builtin import fs, shell
+from harness_agentic.tools.builtin import fs, session, shell
 from harness_agentic.tools.registry import ToolRegistry, registry
 from harness_agentic.tools.spec import Toolset
 
-__all__ = ["fs", "install_builtins", "shell"]
+__all__ = ["fs", "install_builtins", "session", "shell"]
 
 
 def install_builtins(target: ToolRegistry | None = None) -> ToolRegistry:
@@ -29,6 +29,13 @@ def install_builtins(target: ToolRegistry | None = None) -> ToolRegistry:
             name="file",
             description="Read, search, and edit files in the workspace.",
             tools=("read_file", "write_file", "list_dir", "glob_files", "grep_files"),
+        )
+    )
+    reg.define_toolset(
+        Toolset(
+            name="core",
+            description="Always-on tools: searching the agent's own history.",
+            tools=("session_search",),
         )
     )
     reg.define_toolset(

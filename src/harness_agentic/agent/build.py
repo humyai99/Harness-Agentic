@@ -17,7 +17,14 @@ from harness_agentic.agent.runner import AgentRunner, ModelChoice
 from harness_agentic.core.cancel import CancelToken
 from harness_agentic.core.clock import Clock, SystemClock
 from harness_agentic.core.events import EventSink, ToolProgress, null_sink
+from harness_agentic.core.types import Message, TextBlock
 from harness_agentic.envs.local import LocalEnvironment
+from harness_agentic.memory.budget import TokenBudget
+from harness_agentic.memory.compactor import (
+    SUMMARY_PROMPT,
+    ContextCompactor,
+    transcript_for_summary,
+)
 from harness_agentic.prompts.builder import (
     PromptBuilder,
     identity_fragment,
@@ -25,16 +32,19 @@ from harness_agentic.prompts.builder import (
     volatile_fragment,
     workspace_fragment,
 )
+from harness_agentic.providers.base import CompletionRequest
 from harness_agentic.providers.resolver import TransportResolver
-from harness_agentic.session.store import JsonlSessionStore, SessionStore
+from harness_agentic.session.sqlite_store import SqliteSessionStore
 from harness_agentic.tools.approval import ApprovalPolicy
 from harness_agentic.tools.builtin import install_builtins
+from harness_agentic.tools.builtin.session import install_session_tools
 from harness_agentic.tools.dispatch import ToolExecutor
 from harness_agentic.tools.registry import ToolRegistry, registry
 
 if TYPE_CHECKING:
     from harness_agentic.envs.base import ExecEnvironment
     from harness_agentic.providers.base import ProviderTransport
+    from harness_agentic.session.store import SessionStore
     from harness_agentic.tools.spec import ApprovalRequest
 
 
@@ -121,9 +131,14 @@ def build_agent(
     ]
 
     tool_registry = install_builtins(registry)
-    resolved_tools = tool_registry.resolve(enabled_toolsets=list(toolsets), surface=surface)
+    store = SqliteSessionStore(sessions_dir / "state.db")
+    # Needs a live store, so it is registered here rather than at import time.
+    install_session_tools(tool_registry, store)
 
-    store = JsonlSessionStore(sessions_dir)
+    # `core` is always on: an agent that cannot reach its own history has to
+    # guess at anything compaction summarized away.
+    active_toolsets = list(dict.fromkeys(["core", *toolsets]))
+    resolved_tools = tool_registry.resolve(enabled_toolsets=active_toolsets, surface=surface)
     session = store.create(source=surface, cwd=workspace, model=chain[0].model)
 
     policy = approval or ApprovalPolicy(surface=surface)
@@ -148,12 +163,38 @@ def build_agent(
         )
     )
 
+    # Summarize with the cheapest model in the chain rather than the primary:
+    # compaction happens on the longest conversations, which is exactly when
+    # paying top-tier rates to write a summary hurts most.
+    summary_choice = chain[-1]
+
+    def summarize(span: Sequence[Message]) -> str:
+        request = CompletionRequest(
+            model=summary_choice.model,
+            messages=(
+                Message(
+                    role="user",
+                    content=(TextBlock(f"{SUMMARY_PROMPT}\n\n{transcript_for_summary(span)}"),),
+                    created_at=the_clock.now(),
+                ),
+            ),
+            max_output_tokens=1024,
+            stream=False,
+        )
+        return summary_choice.transport.send(request).message.text()
+
     executor = ToolExecutor(tool_registry, approval=policy, emit=emit)
+    primary = resolver.resolve(model)
     runner = AgentRunner(
         chain=chain,
         registry=tool_registry,
         executor=executor,
-        enabled_toolsets=list(toolsets),
+        enabled_toolsets=active_toolsets,
+        budget=TokenBudget(
+            window=primary.info.context_window,
+            reserve_output=min(primary.info.max_output_tokens, 8192),
+        ),
+        compactor=ContextCompactor(summarize),
         prompts=prompts,
         store=store,
         context=_ContextAdapter(context),

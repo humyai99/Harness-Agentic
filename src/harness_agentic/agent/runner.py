@@ -27,6 +27,8 @@ from harness_agentic.agent.sanitize import sanitize
 from harness_agentic.core.cancel import CancelToken
 from harness_agentic.core.clock import Clock, SystemClock
 from harness_agentic.core.events import (
+    CompactionFinished,
+    CompactionStarted,
     EventSink,
     IterationStarted,
     Notice,
@@ -53,7 +55,9 @@ from harness_agentic.core.types import (
 )
 from harness_agentic.errors import (
     AuthError,
+    CompactionDeferred,
     ContentFiltered,
+    ContextExhausted,
     ContextOverflow,
     Interrupted,
     MalformedResponse,
@@ -62,9 +66,12 @@ from harness_agentic.errors import (
     RateLimited,
     TransientProviderError,
 )
+from harness_agentic.memory.compactor import SUMMARY_MARKER
 from harness_agentic.providers.base import CompletionRequest, ProviderTransport
 
 if TYPE_CHECKING:
+    from harness_agentic.memory.budget import TokenBudget
+    from harness_agentic.memory.compactor import CompactionNote, ContextCompactor
     from harness_agentic.prompts.builder import PromptBuilder
     from harness_agentic.session.store import SessionRecord, SessionStore
     from harness_agentic.tools.dispatch import ToolExecutor
@@ -84,6 +91,8 @@ MAX_CONTINUATIONS = 2
 """How many times to nudge a truncated answer to continue before accepting it."""
 MAX_TOOL_REISSUES = 2
 """How many times to ask again when the provider claims a tool call but sends none."""
+MAX_COMPACTIONS_PER_TURN = 3
+"""After this the request still does not fit and pretending otherwise wastes calls."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +135,8 @@ class AgentRunner:
         store: SessionStore,
         context: ToolContext,
         enabled_toolsets: Sequence[str] | None = None,
+        budget: TokenBudget | None = None,
+        compactor: ContextCompactor | None = None,
         emit: EventSink = null_sink,
         clock: Clock | None = None,
         max_iterations: int = 40,
@@ -143,6 +154,8 @@ class AgentRunner:
         self._store = store
         self._context = context
         self._enabled_toolsets = list(enabled_toolsets) if enabled_toolsets else None
+        self._budget = budget
+        self._compactor = compactor
         self._emit = emit
         self._clock = clock or SystemClock()
         self._max_iterations = max_iterations
@@ -195,6 +208,7 @@ class AgentRunner:
         continuations = 0
         reissues = 0
         stable_digest: str | None = None
+        compactions = 0
         final_text = ""
         exit_reason: ExitReason = "completed"
         error: str | None = None
@@ -243,6 +257,40 @@ class AgentRunner:
                 if not report.clean:
                     self._emit(Notice("info", f"history repaired: {report.summary()}"))
 
+                # Budget before building the request, not after: an overflow
+                # discovered by the provider costs a full round trip, and the
+                # estimate is cheap.
+                if self._budget is not None and self._compactor is not None:
+                    estimate = self._budget.estimate(
+                        system, repaired, self._registry.schemas(tools)
+                    )
+                    if self._budget.over_threshold(estimate):
+                        if compactions >= MAX_COMPACTIONS_PER_TURN:
+                            exit_reason, error = "error", "context exhausted after compaction"
+                            break
+                        try:
+                            history, note = self._compact(
+                                history, session, aggressiveness=compactions
+                            )
+                            compactions += 1
+                            self._emit(
+                                CompactionFinished(
+                                    replaced_messages=note.messages_before - note.messages_after,
+                                    tokens_before=note.tokens_before,
+                                    tokens_after=note.tokens_after,
+                                )
+                            )
+                            continue
+                        except CompactionDeferred as exc:
+                            # Another writer holds the session. Soft: back off
+                            # and retry rather than discarding the conversation.
+                            self._emit(Notice("info", f"compaction deferred: {exc}"))
+                            self._clock.sleep(0.2)
+                            continue
+                        except ContextExhausted as exc:
+                            exit_reason, error = "error", str(exc)
+                            break
+
                 request = CompletionRequest(
                     model=self.current.model,
                     messages=tuple(repaired),
@@ -274,7 +322,36 @@ class AgentRunner:
                         continue
                     exit_reason, error = "error", str(exc)
                     break
-                except (AuthError, ModelUnavailable, ContextOverflow) as exc:
+                except ContextOverflow as exc:
+                    # The estimator was wrong in the expensive direction. Bump
+                    # it hard and compact rather than repeating the request.
+                    if self._budget is not None:
+                        self._budget.shrink_from_error()
+                    if self._compactor is not None and compactions < MAX_COMPACTIONS_PER_TURN:
+                        try:
+                            history, note = self._compact(
+                                history, session, aggressiveness=compactions
+                            )
+                            compactions += 1
+                            # Same event as the budget-driven path. A silent
+                            # compaction leaves the operator wondering why the
+                            # agent suddenly forgot the middle of the session.
+                            self._emit(
+                                CompactionFinished(
+                                    replaced_messages=note.messages_before - note.messages_after,
+                                    tokens_before=note.tokens_before,
+                                    tokens_after=note.tokens_after,
+                                )
+                            )
+                            continue
+                        except (ContextExhausted, CompactionDeferred):
+                            pass
+                    if self._advance(str(exc)):
+                        api_retries = 0
+                        continue
+                    exit_reason, error = "error", str(exc)
+                    break
+                except (AuthError, ModelUnavailable) as exc:
                     # Nothing to gain from retrying any of these on the same
                     # model: bad credentials stay bad, a missing model stays
                     # missing, and an overflow needs compaction (M3) not a
@@ -291,6 +368,10 @@ class AgentRunner:
                 iterations += 1
                 api_retries = 0
                 total = total + response.usage
+                if self._budget is not None and response.usage.input_tokens:
+                    # Every real response teaches the estimator something, and
+                    # the error is systematic enough to be worth learning.
+                    self._budget.observe(response.usage.input_tokens)
                 self._emit(UsageReported(usage=response.usage, cumulative=total))
 
                 self._store.append(session.id, [response.message], usage=response.usage)
@@ -365,6 +446,34 @@ class AgentRunner:
             provider_used=self.current.provider,
             model_used=self.current.model,
         )
+
+    def _compact(
+        self,
+        history: list[Message],
+        session: SessionRecord,
+        *,
+        aggressiveness: int,
+    ) -> tuple[list[Message], CompactionNote]:
+        """Compact the working history and record it in the store.
+
+        The store keeps the originals hidden rather than deleting them, so the
+        compaction stays reversible and full-text search still reaches the
+        text that was summarized away.
+        """
+        assert self._compactor is not None  # noqa: S101  -- guarded by the caller
+        self._emit(CompactionStarted(from_seq=0, to_seq=len(history) - 1))
+        rebuilt, note = self._compactor.compact(
+            history, now=self._clock.now(), aggressiveness=aggressiveness
+        )
+        recorder = getattr(self._store, "record_compaction", None)
+        if callable(recorder):
+            summary = next(
+                (m for m in rebuilt if SUMMARY_MARKER in m.text()),
+                None,
+            )
+            if summary is not None:
+                recorder(session.id, replaced=note.replaced, summary=summary)
+        return rebuilt, note
 
     # -- helpers ------------------------------------------------------------
 

@@ -65,6 +65,8 @@ path = "src/harness_agentic/version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/harness_agentic"]
+# schema.sql and prompt templates are read at runtime, so they have to ship.
+artifacts = ["*.sql", "*.md"]
 
 # ---------------------------------------------------------------- ruff ------
 
