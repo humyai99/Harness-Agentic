@@ -205,8 +205,54 @@ def test_secret_shapes_are_recognised(text: str) -> None:
     assert looks_like_secret(text)
 
 
-def test_ordinary_text_is_not_a_secret() -> None:
-    assert not looks_like_secret("please read the config file")
+@pytest.mark.parametrize(
+    "text",
+    [
+        "here is my key: sk-abcdefghijklmnopqrstuvwx",
+        "ANTHROPIC_API_KEY=sk-abcdefghijklmnopqrstuvwx",
+        "use ghp_abcdefghijklmnopqrstuvwxyz1234 for the repo",
+        "the token is xoxb-1234567890-abcdefghijk",
+        "deploy with AKIAIOSFODNN7EXAMPLE please",
+    ],
+)
+def test_a_secret_inside_a_sentence_is_recognised(text: str) -> None:
+    """The bug: this tested ``startswith``, so only a bare key ever matched.
+
+    A person pasting a credential writes a sentence around it, which is the
+    entire population of real cases -- and every one of them reached the provider
+    and the transcript without a word of warning.
+    """
+    assert looks_like_secret(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "please read the config file",
+        # "task-list" contains "sk-", which is why this is tokenized rather than
+        # substring-matched.
+        "add it to the task-list",
+        "the commit is 9fd0fe7a1b2c3d4e5f60718293a4b5c6d7e8f900",
+        "run pytest -q and tell me what fails",
+    ],
+)
+def test_ordinary_text_is_not_a_secret(text: str) -> None:
+    # A warning that fires on ordinary sentences is one people learn to ignore.
+    assert not looks_like_secret(text)
+
+
+@pytest.mark.parametrize(
+    "denied", ["secret.PEM", ".ENV", "deploy/ID_RSA", "certs/Server.Key", "sub/.Env.local"]
+)
+def test_credential_paths_are_denied_whatever_their_case(denied: str, tmp_path: Path) -> None:
+    """``fnmatch`` follows the platform, so this was Mac-only protection.
+
+    It normalizes case with ``os.path.normcase`` -- case-insensitive on macOS and
+    Windows, case-*sensitive* on Linux. So these were denied on a developer's
+    laptop and readable on the Linux host the gateway runs on. A deny-list whose
+    coverage depends on the filesystem is the wrong kind of surprise.
+    """
+    assert PathPolicy().is_denied(tmp_path / denied, root=tmp_path)
 
 
 # -- approval ------------------------------------------------------------------

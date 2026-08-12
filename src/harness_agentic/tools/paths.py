@@ -15,9 +15,11 @@ transcript on disk. The deny-list is what stops that.
 from __future__ import annotations
 
 import fnmatch
+import re
 from collections.abc import Iterable, Sequence
 from pathlib import PurePath, PurePosixPath
 
+from harness_agentic.core.secrets import looks_like_credential
 from harness_agentic.errors import PathOutsideWorkspace
 
 DEFAULT_DENY_GLOBS: tuple[str, ...] = (
@@ -52,6 +54,26 @@ DEFAULT_DENY_GLOBS: tuple[str, ...] = (
 
 ALWAYS_ALLOW: tuple[str, ...] = (".env.example", "**/.env.example", "**/.env.sample")
 """Templates that exist precisely to be read; they hold no values."""
+
+_KEY_PREFIXES = (
+    "sk-",
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "ghr_",
+    "github_pat_",
+    "xoxb-",
+    "xoxp-",
+    "xoxa-",
+    "xoxr-",
+    "AKIA",
+    "AIza",
+    "ya29.",
+)
+"""Prefixes worth warning about even when what follows is too short to be real."""
+_TOKENS = re.compile(r"[\s,;\"'`()\[\]{}<>=]+")
+"""Splits a message into tokens, so ``KEY=sk-…`` is seen and ``task-list`` is not."""
 
 
 class PathPolicy:
@@ -109,9 +131,21 @@ def _expand(patterns: Sequence[str]) -> tuple[str, ...]:
 
 
 def _matches_any(candidates: Sequence[str], patterns: Sequence[str]) -> bool:
-    """Whether any candidate matches any pattern."""
+    """Whether any candidate matches any pattern, ignoring case.
+
+    Case-folded on every platform. ``fnmatch.fnmatch`` normalizes case using
+    ``os.path.normcase``, so it is case-insensitive on macOS and Windows and
+    case-*sensitive* on Linux -- which meant ``key.PEM``, ``.ENV`` and
+    ``ID_RSA`` were denied on a developer's Mac and readable on the Linux box
+    the gateway runs on. A deny-list whose coverage depends on the host
+    filesystem is the wrong kind of surprise, and every pattern here is a
+    lowercase convention rather than an exact filename.
+    """
+    folded = [candidate.lower() for candidate in candidates]
     return any(
-        fnmatch.fnmatch(candidate, pattern) for pattern in patterns for candidate in candidates
+        fnmatch.fnmatchcase(candidate, pattern.lower())
+        for pattern in patterns
+        for candidate in folded
     )
 
 
@@ -129,9 +163,23 @@ def looks_like_secret(text: str) -> bool:
     Used to warn when one appears in *user input*, so the operator is told to
     rotate it rather than having it silently forwarded to a provider. Not a
     replacement for redaction, which runs over tool output and logs.
+
+    This used to test ``startswith`` against a list of prefixes, which meant it
+    only fired on a message that was *nothing but* a key. "here is my key: sk-…"
+    and "ANTHROPIC_API_KEY=sk-…" both went to the provider and into the
+    transcript with no warning -- and a sentence around the key is what a real
+    paste looks like. The shapes now come from
+    :mod:`harness_agentic.core.secrets`, so there is one definition rather than
+    three that drift.
+
+    Deliberately the most eager of the three users of those shapes. Redaction and
+    the validator's blocking scan pay for a false positive -- a mangled tool
+    result, a refused skill -- so they want the full-length shapes. Here the cost
+    of being wrong is one line of yellow text, and the cost of being right and
+    silent is a live credential in a transcript. So a known prefix on any *token*
+    counts, even when what follows is too short to be a real key: tokenized
+    rather than substring-matched, because "task-list" contains "sk-".
     """
-    stripped = text.strip()
-    prefixes = ("sk-", "ghp_", "gho_", "github_pat_", "xoxb-", "xoxp-", "AKIA", "AIza")
-    if any(stripped.startswith(p) for p in prefixes):
+    if looks_like_credential(text):
         return True
-    return "-----BEGIN" in stripped and "PRIVATE KEY" in stripped
+    return any(token.startswith(_KEY_PREFIXES) for token in _TOKENS.split(text))

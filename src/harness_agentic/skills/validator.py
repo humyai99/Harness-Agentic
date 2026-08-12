@@ -19,6 +19,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import IntEnum
 
+from harness_agentic.core.secrets import CREDENTIAL_PATTERNS
 from harness_agentic.skills.frontmatter import Finding, parse_frontmatter, read_fields
 from harness_agentic.skills.model import (
     LINT_DESCRIPTION_CHARS,
@@ -42,15 +43,10 @@ MAX_SCRIPTS = 10
 MAX_DIR_BYTES = 256 * 1024
 
 # Credential shapes. A skill that embeds one has either leaked a real key or is
-# trying to smuggle one somewhere.
-_SECRET_PATTERNS = (
-    re.compile(r"sk-[A-Za-z0-9_-]{16,}"),
-    re.compile(r"gh[pousr]_[A-Za-z0-9]{16,}"),
-    re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),
-    re.compile(r"AKIA[0-9A-Z]{16}"),
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
-    re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\."),
-)
+# trying to smuggle one somewhere. Shared, so a prefix added for a new provider
+# reaches this scan, the reflection pass's redaction and the operator warning at
+# the same time instead of one of the three.
+_SECRET_PATTERNS = tuple(pattern for pattern, _ in CREDENTIAL_PATTERNS)
 
 # Instructions aimed at the agent rather than at the task. A skill is reference
 # material; text like this is trying to be something else.

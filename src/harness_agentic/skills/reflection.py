@@ -24,6 +24,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from harness_agentic.core.secrets import CREDENTIAL_PATTERNS
+
 CREATE_THRESHOLD = 1.0
 """Cumulative evidence weight before a *new* skill may be proposed."""
 
@@ -232,11 +234,13 @@ class ReflectionTrigger:
 # -- trajectory redaction ------------------------------------------------------
 
 _REDACTIONS = (
-    (re.compile(r"sk-[A-Za-z0-9_-]{16,}"), "<redacted-key>"),
-    (re.compile(r"gh[pousr]_[A-Za-z0-9]{16,}"), "<redacted-token>"),
-    (re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"), "<redacted-token>"),
-    (re.compile(r"AKIA[0-9A-Z]{16}"), "<redacted-key>"),
-    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"), "<redacted-key>"),
+    # Credential shapes come from the one place that defines them, so a prefix
+    # added for a new provider covers redaction, the validator's safety scan and
+    # the operator warning together rather than one of the three.
+    *CREDENTIAL_PATTERNS,
+    # Contact details are this pass's own concern: a trajectory is about to be
+    # summarized into something durable, and an address in it is personal data
+    # that has no business being there.
     (re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.]+\b"), "<redacted-email>"),
 )
 
