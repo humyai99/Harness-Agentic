@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import json
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -30,7 +31,7 @@ from harness_agentic.mcp.protocol import (
     ToolSpec,
     parse_tool_list,
 )
-from harness_agentic.mcp.stdio import ServerConfig, load_servers
+from harness_agentic.mcp.stdio import McpError, ServerConfig, StdioServer, load_servers
 from harness_agentic.tools.registry import ToolRegistry
 from harness_agentic.tools.spec import Danger
 
@@ -236,6 +237,22 @@ def test_the_child_environment_is_built_up_not_filtered_down(
     assert "ANTHROPIC_API_KEY" not in resolved
 
 
+def test_two_servers_with_one_name_are_refused() -> None:
+    """The name keys their tools and their lifecycle, so a duplicate is a leak.
+
+    ``McpBridge.servers`` is a dict on the name, so the second entry replaced the
+    first and ``close()`` never stopped it -- an orphaned child process left
+    running, which is the one thing this module's lifecycle exists to prevent.
+    """
+    with pytest.raises(ValueError, match="both named"):
+        load_servers(
+            [
+                {"name": "files", "command": ["one"]},
+                {"name": "files", "command": ["two"]},
+            ]
+        )
+
+
 def test_an_entry_with_no_name_is_refused() -> None:
     with pytest.raises(ValueError, match="no name"):
         load_servers([{"command": ["x"]}])
@@ -313,6 +330,41 @@ for line in sys.stdin:
 """
 
 
+CHATTY_SERVER = """
+import json, sys, time
+
+def send(payload):
+    sys.stdout.write(json.dumps(payload) + "\\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    message = json.loads(line)
+    method = message.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {
+            "protocolVersion": "REPLACE_VERSION",
+            "serverInfo": {"name": "chatty", "version": "1.0"},
+            "capabilities": {"tools": {}},
+        }})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/call":
+        # Progress forever, and never the answer. This is not a contrived
+        # server: notifications/progress during a slow call is the normal thing
+        # for a real one to do.
+        while True:
+            send({"jsonrpc": "2.0", "method": "notifications/progress",
+                  "params": {"progressToken": 1, "progress": 1}})
+            time.sleep(0.02)
+    else:
+        send({"jsonrpc": "2.0", "id": message.get("id"),
+              "error": {"code": -32601, "message": "no " + str(method)}})
+"""
+
+
 @pytest.fixture
 def server_script(tmp_path: Path) -> Path:
     from harness_agentic.mcp.protocol import PROTOCOL_VERSION
@@ -320,6 +372,54 @@ def server_script(tmp_path: Path) -> Path:
     path = tmp_path / "demo_server.py"
     path.write_text(SERVER.replace("REPLACE_VERSION", PROTOCOL_VERSION), encoding="utf-8")
     return path
+
+
+@pytest.fixture
+def chatty_server_script(tmp_path: Path) -> Path:
+    from harness_agentic.mcp.protocol import PROTOCOL_VERSION
+
+    path = tmp_path / "chatty_server.py"
+    path.write_text(CHATTY_SERVER.replace("REPLACE_VERSION", PROTOCOL_VERSION), encoding="utf-8")
+    return path
+
+
+def test_a_chatty_server_cannot_hold_a_request_open_forever(chatty_server_script: Path) -> None:
+    """The bug: the idle timeout was passed to every ``get`` and nothing else.
+
+    So any message at all reset it, and a server sending progress notifications
+    just inside the interval kept the request open indefinitely. With a
+    synchronous core that means the turn never ends, and nothing is logged above
+    debug. ``max_wait_s`` now bounds the request as a whole.
+
+    Run on a thread so a regression fails this test rather than hanging the suite.
+    """
+    server = StdioServer(
+        config=ServerConfig(
+            name="chatty",
+            command=(sys.executable, str(chatty_server_script)),
+            timeout_s=5.0,  # generous: the point is that the ceiling, not this, stops it
+            max_wait_s=1.0,
+        )
+    )
+    server.start()
+    outcome: list[object] = []
+
+    def call() -> None:
+        try:
+            server.request("tools/call", {"name": "slow", "arguments": {}})
+        except Exception as exc:
+            outcome.append(exc)
+        else:
+            outcome.append("it returned a result")
+
+    thread = threading.Thread(target=call, daemon=True)
+    thread.start()
+    thread.join(timeout=20)
+    server.stop()
+
+    assert outcome, "the request never came back -- the ceiling did not bound it"
+    assert isinstance(outcome[0], McpError), outcome[0]
+    assert "past" in str(outcome[0]), outcome[0]
 
 
 def test_a_real_server_handshakes_lists_and_answers(server_script: Path) -> None:

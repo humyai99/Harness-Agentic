@@ -26,6 +26,7 @@ import os
 import queue
 import subprocess
 import threading
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -37,6 +38,13 @@ from harness_agentic.mcp.protocol import Notification, Reply, Request, Session
 log = logging.getLogger(__name__)
 
 READ_TIMEOUT_S = 30.0
+"""How long to wait for the *next* message from a server before giving up. A
+server sending progress notifications resets this, which is what they are for."""
+MAX_WAIT_S = 300.0
+"""The hard ceiling on one request, however chatty the server is. Without an
+absolute bound, a server emitting a notification just inside the idle timeout
+keeps a request open forever -- and because the core is synchronous, forever
+means the whole turn."""
 SHUTDOWN_GRACE_S = 5.0
 MAX_STDERR_LINES = 50
 """Kept for diagnostics. A server that logs a megabyte is not worth storing."""
@@ -59,6 +67,10 @@ class ServerConfig:
     """Names to copy from this process's environment. Nothing else is copied."""
     cwd: Path | None = None
     timeout_s: float = READ_TIMEOUT_S
+    """Idle timeout: how long to wait for the next message, not for the answer."""
+    max_wait_s: float = MAX_WAIT_S
+    """Ceiling on one whole request, regardless of how much the server says
+    meanwhile. This is what guarantees a request terminates."""
     enabled: bool = True
 
     def resolved_env(self) -> dict[str, str]:
@@ -233,14 +245,38 @@ class StdioServer:
         Matching on id rather than taking the next line: a server may interleave
         notifications and its own requests with the answer, and reading the next
         line works against every toy server and fails against a real one.
+
+        Two bounds, because one is not enough. ``timeout_s`` is an *idle* timeout
+        on the next message, so a server reporting progress on a slow call is not
+        killed for taking a while -- that is what progress notifications are for.
+        ``max_wait_s`` then caps the request as a whole. Passing the idle timeout
+        to every ``get`` and nothing else meant a server that says anything at all
+        just inside it kept the request open indefinitely, and ``notifications/
+        progress`` during a long tool call does exactly that. With a synchronous
+        core, indefinitely means the turn never ends and nothing is logged above
+        debug.
         """
         self.send(request)
-        deadline = self.config.timeout_s
+        idle = self.config.timeout_s
+        ceiling = time.monotonic() + self.config.max_wait_s
         while True:
+            remaining = min(idle, ceiling - time.monotonic())
+            if remaining <= 0:
+                detail = (
+                    f"{self.config.name} kept {request.method} open past "
+                    f"{self.config.max_wait_s:.0f}s without answering it"
+                )
+                raise McpError(detail)
             try:
-                item = self._inbox.get(timeout=deadline)
+                item = self._inbox.get(timeout=remaining)
             except queue.Empty as exc:
-                detail = f"{self.config.name} did not answer {request.method} in {deadline:.0f}s"
+                detail = (
+                    f"{self.config.name} kept {request.method} open past "
+                    f"{self.config.max_wait_s:.0f}s without answering it"
+                    if ceiling - time.monotonic() <= 0
+                    else f"{self.config.name} said nothing for {idle:.0f}s "
+                    f"while {request.method} was outstanding"
+                )
                 raise McpError(detail) from exc
             if isinstance(item, McpError):
                 raise item
@@ -303,14 +339,29 @@ def load_servers(entries: Sequence[Mapping[str, object]]) -> list[ServerConfig]:
     A string command is refused rather than split. ``npx -y @scope/server`` looks
     harmless and ``sh -c "..."`` does not, and the difference is not something a
     config loader should be deciding by heuristic.
+
+    Duplicate names are refused because the name is what everything downstream
+    keys by: ``McpBridge.servers`` is a dict on it and tool names are prefixed
+    with it. Two servers sharing a name meant the second's entry replaced the
+    first's, so ``close()`` never stopped the first -- an orphaned child process
+    left running, which is the one thing this module's lifecycle exists to
+    prevent -- and its tools were silently overridden.
     """
     configs: list[ServerConfig] = []
+    seen: set[str] = set()
     for entry in entries:
         name = str(entry.get("name") or "")
         command = entry.get("command")
         if not name:
             detail = f"an MCP server entry has no name: {entry!r}"
             raise ValueError(detail)
+        if name in seen:
+            detail = (
+                f"two MCP servers are both named {name!r}; the name keys their "
+                f"tools and their lifecycle, so they have to differ"
+            )
+            raise ValueError(detail)
+        seen.add(name)
         if isinstance(command, str) or not isinstance(command, (list, tuple)) or not command:
             # A string is refused rather than split. `npx -y @scope/server` looks
             # harmless and `sh -c "..."` does not, and that difference is not
@@ -321,6 +372,7 @@ def load_servers(entries: Sequence[Mapping[str, object]]) -> list[ServerConfig]:
             )
             raise TypeError(detail)
         timeout = entry.get("timeout_s")
+        ceiling = entry.get("max_wait_s")
 
         raw_env = entry.get("env")
         configs.append(
@@ -333,6 +385,7 @@ def load_servers(entries: Sequence[Mapping[str, object]]) -> list[ServerConfig]:
                 env_passthrough=_names(entry.get("env_passthrough")),
                 cwd=Path(str(entry["cwd"])) if entry.get("cwd") else None,
                 timeout_s=float(timeout) if isinstance(timeout, (int, float)) else READ_TIMEOUT_S,
+                max_wait_s=float(ceiling) if isinstance(ceiling, (int, float)) else MAX_WAIT_S,
                 enabled=bool(entry.get("enabled", True)),
             )
         )
