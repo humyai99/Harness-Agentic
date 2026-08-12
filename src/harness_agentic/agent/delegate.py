@@ -124,12 +124,22 @@ class DelegationLimits:
         # guess at anything it was not told.
         return list(dict.fromkeys(["core", *asked]))
 
-    def child(self) -> DelegationLimits:
-        """The limits for one level down."""
+    def child(self, granted: Sequence[str]) -> DelegationLimits:
+        """The limits for one level down, bounded by what the child actually got.
+
+        ``granted`` is required, and it is the whole point. Passing the *parent's*
+        set down meant the intersection reset at every level: a parent with
+        ``{file, terminal}`` delegating a child limited to ``{file}`` left that
+        child able to spawn a grandchild with ``terminal`` -- the escalation this
+        class exists to prevent, one level further down than anyone looks.
+
+        So the ceiling only ever descends. A grandchild cannot reach a toolset its
+        own parent was denied, however many levels are involved.
+        """
         return DelegationLimits(
             max_depth=self.max_depth - 1,
             max_children=self.max_children,
-            allowed_toolsets=self.allowed_toolsets,
+            allowed_toolsets=tuple(dict.fromkeys(granted)),
         )
 
 

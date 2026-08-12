@@ -229,7 +229,9 @@ def build_agent(
                 sql_source=sql_source,
                 retriever=retriever,
                 http_fetcher=http_fetcher,
-                delegation=limits.child(),
+                # Bounded by what *this* child got, not by what the parent had:
+                # otherwise the intersection resets one level down.
+                delegation=limits.child(granted),
                 surface=surface,
                 emit=emit,
                 approval=approval,

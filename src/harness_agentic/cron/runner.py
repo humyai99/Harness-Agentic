@@ -314,8 +314,15 @@ def load_jobs(entries: Sequence[dict[str, object]]) -> list[Job]:
     Refusing rather than skipping: a typo in a cron expression means a job that
     silently never runs, and "silently never runs" is the failure mode a
     scheduler must not have.
+
+    Duplicate names are refused for the same reason. A job's name is its identity
+    everywhere it matters -- ``_running`` keys overlap detection by it,
+    ``_last_fired`` keys the no-backfill rule by it, and ``harn cron run <name>``
+    resolves by it. Two jobs sharing one meant the second silently shadowed the
+    first at the command line and the two fought over each other's overlap state.
     """
     jobs: list[Job] = []
+    seen: set[str] = set()
     for entry in entries:
         name = str(entry.get("name") or "")
         expression = str(entry.get("schedule") or "")
@@ -323,6 +330,13 @@ def load_jobs(entries: Sequence[dict[str, object]]) -> list[Job]:
         if not (name and expression and prompt):
             detail = f"a cron job needs name, schedule and prompt; got {entry!r}"
             raise ValueError(detail)
+        if name in seen:
+            detail = (
+                f"two cron jobs are both named {name!r}; a name identifies a job, "
+                f"so they have to differ"
+            )
+            raise ValueError(detail)
+        seen.add(name)
         jobs.append(
             Job(
                 name=name,

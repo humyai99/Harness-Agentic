@@ -253,6 +253,23 @@ def test_loading_jobs_refuses_an_incomplete_entry() -> None:
         load_jobs([{"name": "x", "schedule": "@daily"}])
 
 
+def test_loading_jobs_refuses_two_jobs_with_one_name() -> None:
+    """A name is a job's identity, so a duplicate is not a duplicate job.
+
+    Overlap detection, the no-backfill rule and ``harn cron run <name>`` all key
+    by name. Two jobs sharing one meant the second silently shadowed the first at
+    the command line and the two fought over each other's overlap state -- which
+    is the "silently never runs" failure this module refuses everywhere else.
+    """
+    with pytest.raises(ValueError, match="both named"):
+        load_jobs(
+            [
+                {"name": "report", "schedule": "@daily", "prompt": "yesterday"},
+                {"name": "report", "schedule": "@hourly", "prompt": "the last hour"},
+            ]
+        )
+
+
 def test_loaded_jobs_default_to_the_strictest_settings() -> None:
     jobs = load_jobs([{"name": "report", "schedule": "@daily", "prompt": "summarize yesterday"}])
     job = jobs[0]
@@ -307,13 +324,35 @@ def test_core_is_always_granted() -> None:
 
 def test_depth_decreases_one_level_at_a_time() -> None:
     parent = DelegationLimits(max_depth=2, allowed_toolsets=("file",))
-    child = parent.child()
-    grandchild = child.child()
+    child = parent.child(parent.narrow(["file"]))
+    grandchild = child.child(child.narrow(["file"]))
 
     assert (parent.max_depth, child.max_depth, grandchild.max_depth) == (2, 1, 0)
     # At zero the tool is not registered at all, so there is no fourth level.
     assert grandchild.max_depth == 0
-    assert grandchild.allowed_toolsets == ("file",)
+    assert set(grandchild.allowed_toolsets) == {"core", "file"}
+
+
+def test_a_grandchild_cannot_reach_what_its_own_parent_was_denied() -> None:
+    """The bug: ``child()`` carried the *parent's* allowed set downward.
+
+    So the intersection reset at every level. A parent holding ``terminal`` and
+    delegating a child limited to ``file`` left that child able to spawn a
+    grandchild with ``terminal`` -- exactly the escalation the class exists to
+    prevent, one level further down than anyone looks.
+    """
+    parent = DelegationLimits(max_depth=2, allowed_toolsets=("file", "terminal"))
+
+    # The parent delegates a child that asked for `file` only.
+    granted_to_child = parent.narrow(["file"])
+    assert "terminal" not in granted_to_child
+
+    # That child now tries to reach `terminal` through a grandchild.
+    child = parent.child(granted_to_child)
+    granted_to_grandchild = child.narrow(["file", "terminal"])
+
+    assert "terminal" not in granted_to_grandchild
+    assert set(granted_to_grandchild) == {"core", "file"}
 
 
 def test_the_per_turn_child_budget_is_finite() -> None:
