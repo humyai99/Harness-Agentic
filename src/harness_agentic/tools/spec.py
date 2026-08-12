@@ -123,7 +123,10 @@ class Tool:
     name: str
     description: str
     toolset: str
-    params_model: type[BaseModel]
+    params_model: type[BaseModel] | None
+    """``None`` for a tool whose schema comes from elsewhere -- an MCP server
+    publishes JSON Schema already, and round-tripping it through a generated
+    pydantic model would lose the parts pydantic cannot express."""
     handler: _Handler
     danger: Danger = Danger.SAFE
     requires_env_vars: tuple[str, ...] = ()
@@ -132,14 +135,40 @@ class Tool:
     timeout_s: float = 120.0
     surfaces: frozenset[str] = frozenset({"cli", "gateway", "cron"})
     source: str = "builtin"
+    raw_schema: Mapping[str, Any] | None = None
+    """A JSON Schema supplied directly, used when ``params_model`` is ``None``."""
+
+    def __post_init__(self) -> None:
+        """Refuse a tool with no way to describe its arguments."""
+        if self.params_model is None and self.raw_schema is None:
+            detail = f"tool {self.name!r} needs either a params_model or a raw_schema"
+            raise ValueError(detail)
 
     def schema(self) -> ToolSchema:
         """Render the wire-facing schema the model is shown."""
+        if self.params_model is None:
+            assert self.raw_schema is not None  # noqa: S101 - __post_init__ guarantees it
+            return ToolSchema(
+                name=self.name,
+                description=self.description,
+                parameters=_inline_refs(dict(self.raw_schema), self.raw_schema.get("$defs", {})),
+            )
         return ToolSchema(
             name=self.name,
             description=self.description,
             parameters=_json_schema(self.params_model),
         )
+
+    def validate_arguments(self, arguments: Mapping[str, Any]) -> Any:
+        """Coerce arguments for the handler, raising ``ValidationError``.
+
+        A schema-only tool gets the raw mapping: the schema belongs to a remote
+        server, and re-validating against a locally reconstructed model would
+        reject arguments the server would have accepted.
+        """
+        if self.params_model is None:
+            return dict(arguments)
+        return self.params_model.model_validate(dict(arguments))
 
     def is_available(self) -> bool:
         """Whether this tool should be offered at all right now."""

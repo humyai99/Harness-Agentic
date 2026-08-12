@@ -21,9 +21,10 @@ from harness_agentic.agent.delegate import (
 from harness_agentic.agent.runner import AgentRunner, ModelChoice
 from harness_agentic.core.cancel import CancelToken
 from harness_agentic.core.clock import Clock, SystemClock
-from harness_agentic.core.events import EventSink, ToolProgress, null_sink
+from harness_agentic.core.events import EventSink, Notice, ToolProgress, null_sink
 from harness_agentic.core.types import Message, TextBlock
 from harness_agentic.envs.local import LocalEnvironment
+from harness_agentic.mcp.bridge import McpBridge
 from harness_agentic.memory.budget import TokenBudget
 from harness_agentic.memory.compactor import (
     SUMMARY_PROMPT,
@@ -59,6 +60,7 @@ if TYPE_CHECKING:
     from harness_agentic.data.kb import Retriever
     from harness_agentic.data.sql import SqlSource
     from harness_agentic.envs.base import ExecEnvironment
+    from harness_agentic.mcp.stdio import ServerConfig
     from harness_agentic.net.fetch import Fetcher
     from harness_agentic.net.search import SearchProvider
     from harness_agentic.providers.base import ProviderTransport
@@ -122,6 +124,10 @@ class AgentBundle:
     executor: ToolExecutor
     """Exposed so a surface can read what ran, and whether anything it ran
     brought untrusted content into the conversation."""
+    mcp: McpBridge | None = None
+    """The connected MCP servers, if any. A surface that owns this bundle owns
+    closing it -- an MCP server is a child process, and one left running after
+    the agent goes away is a leak the operator finds with `ps`."""
 
 
 def build_agent(
@@ -136,6 +142,7 @@ def build_agent(
     retriever: Retriever | None = None,
     http_fetcher: Fetcher | None = None,
     delegation: DelegationLimits | None = None,
+    mcp_servers: Sequence[ServerConfig] = (),
     surface: str = "cli",
     emit: EventSink = null_sink,
     approval: ApprovalPolicy | None = None,
@@ -188,7 +195,18 @@ def build_agent(
     if http_fetcher is not None:
         install_http_tools(tool_registry, http_fetcher)
 
-    limits = delegation or DelegationLimits(allowed_toolsets=tuple(toolsets))
+    bridge: McpBridge | None = None
+    if mcp_servers:
+        # Connected before the toolsets are resolved, because each server
+        # contributes its own `mcp:<name>` toolset and the agent has to be able
+        # to ask for it.
+        bridge = McpBridge(registry=tool_registry)
+        bridge.connect_all(mcp_servers)
+        for line in bridge.report():
+            emit(Notice("warning" if "FAILED" in line else "info", line))
+
+    mcp_toolsets = [f"mcp:{name}" for name in (bridge.servers if bridge else ())]
+    limits = delegation or DelegationLimits(allowed_toolsets=(*toolsets, *mcp_toolsets))
     if limits.max_depth > 0:
         # A child gets a fresh agent with the same wiring and one less level of
         # depth. Building it lazily matters: an agent that never delegates must
@@ -220,7 +238,7 @@ def build_agent(
 
     # `core` is always on: an agent that cannot reach its own history has to
     # guess at anything compaction summarized away.
-    active_toolsets = list(dict.fromkeys(["core", *toolsets]))
+    active_toolsets = list(dict.fromkeys(["core", *toolsets, *mcp_toolsets]))
     resolved_tools = tool_registry.resolve(enabled_toolsets=active_toolsets, surface=surface)
     session = store.create(source=surface, cwd=workspace, model=chain[0].model)
 
@@ -295,4 +313,5 @@ def build_agent(
         context=context,
         prompts=prompts,
         executor=executor,
+        mcp=bridge,
     )

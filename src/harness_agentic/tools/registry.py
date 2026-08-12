@@ -170,6 +170,15 @@ class ToolRegistry:
                 stack.extend(group.includes)
         return seen
 
+    def unregister(self, name: str) -> bool:
+        """Remove a tool. Returns whether it was there.
+
+        Needed because a tool's provider can go away while the process runs: an
+        MCP server that exits leaves a tool that fails in a way looking like the
+        tool is broken, and the agent will keep retrying it.
+        """
+        return self._tools.pop(name, None) is not None
+
     def fork(self) -> ToolRegistry:
         """A copy that shares nothing mutable with this one.
 

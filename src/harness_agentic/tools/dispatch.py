@@ -130,12 +130,13 @@ class ToolExecutor:
         except Exception as exc:  # a handler must never end the turn
             result = ToolResult.error(f"{tool.name} failed: {type(exc).__name__}: {exc}")
 
-        return self._finish(call, self._bound(result, tool), started, arguments=parsed.model_dump())
+        recorded = parsed if isinstance(parsed, dict) else parsed.model_dump()
+        return self._finish(call, self._bound(result, tool), started, arguments=recorded)
 
     def _parse_arguments(self, tool: Tool, call: ToolUseBlock) -> Any:
         """Validate arguments, or return the error the model should see."""
         try:
-            return tool.params_model.model_validate(dict(call.arguments))
+            return tool.validate_arguments(call.arguments)
         except ValidationError as exc:
             problems = "; ".join(
                 f"{'.'.join(str(p) for p in e['loc']) or '(root)'}: {e['msg']}"

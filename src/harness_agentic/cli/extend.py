@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import typer
+from rich.markup import escape
 from rich.table import Table
 
 from harness_agentic.agent.build import build_agent
@@ -26,6 +27,8 @@ from harness_agentic.cli.render import console
 from harness_agentic.constants import harness_home
 from harness_agentic.cron.runner import CronRunner, Job, load_jobs
 from harness_agentic.cron.schedule import BadSchedule, parse
+from harness_agentic.mcp.bridge import McpBridge
+from harness_agentic.mcp.stdio import ServerConfig, load_servers
 from harness_agentic.plugins.loader import discover, load
 from harness_agentic.tools.builtin import install_builtins
 from harness_agentic.tools.registry import ToolRegistry
@@ -34,9 +37,10 @@ JOBS_FILENAME = "cron.toml"
 
 
 def register(app: typer.Typer) -> None:
-    """Attach the ``plugins`` and ``cron`` command groups."""
+    """Attach the ``plugins``, ``cron`` and ``mcp`` command groups."""
     _register_plugins(app)
     _register_cron(app)
+    register_mcp(app)
 
 
 def _register_plugins(app: typer.Typer) -> None:
@@ -204,12 +208,95 @@ def _load(explicit: Path | None) -> list[Job]:
     raw = tomllib.loads(path.read_text(encoding="utf-8"))
     entries = raw.get("jobs") or raw.get("job") or []
     if not isinstance(entries, list):
-        console.print(f"[red]{path} should contain a list of [[jobs]] tables[/]")
+        console.print(f"[red]{path} should contain a list of {escape('[[jobs]]')} tables[/]")
         raise typer.Exit(code=1)
     try:
         return load_jobs(entries)
     except (ValueError, BadSchedule) as exc:
         # Refused rather than skipped: a job that silently never runs is the one
         # failure a scheduler must not have.
+        console.print(f"[red]{path}: {exc}[/]")
+        raise typer.Exit(code=1) from exc
+
+
+def register_mcp(app: typer.Typer) -> None:
+    """Attach the ``mcp`` command group."""
+    group = typer.Typer(help="Model Context Protocol servers.", no_args_is_help=True)
+    app.add_typer(group, name="mcp")
+
+    @group.command("list")
+    def list_servers(config: Path = typer.Option(None, "--config", "-c")) -> None:
+        """Show the configured servers, without starting any."""
+        servers = _servers(config)
+        if not servers:
+            console.print(
+                f"No MCP servers configured. Add {escape('[[mcp.servers]]')} "
+                f"to {_mcp_path(config)}."
+            )
+            return
+        table = Table("server", "command", "env passthrough", "enabled")
+        for server in servers:
+            table.add_row(
+                server.name,
+                " ".join(server.command),
+                ", ".join(server.env_passthrough) or "-",
+                "yes" if server.enabled else "no",
+            )
+        console.print(table)
+
+    @group.command("check")
+    def check_servers(config: Path = typer.Option(None, "--config", "-c")) -> None:
+        """Start each server, list its tools, and stop it again.
+
+        The diagnostic that matters before trusting a server: it reports what
+        each one actually offers and at what danger level, rather than what its
+        documentation claims.
+        """
+        servers = _servers(config)
+        if not servers:
+            console.print("No MCP servers configured.")
+            return
+        registry = install_builtins(ToolRegistry())
+        bridge = McpBridge(registry=registry)
+        try:
+            bridge.connect_all(servers)
+            for line in bridge.report():
+                console.print(f"[{'red' if 'FAILED' in line else 'green'}]{line}[/]")
+            if bridge.tool_names():
+                table = Table("tool", "danger", "server")
+                for name in bridge.tool_names():
+                    tool = registry.get(name)
+                    table.add_row(name, tool.danger.name.lower(), tool.source)
+                console.print(table)
+            for bridged in bridge.servers.values():
+                if diagnostics := bridged.server.diagnostics():
+                    console.print(f"[dim]{bridged.name} stderr:\n{diagnostics}[/]")
+        finally:
+            # Every server is a child process; leaving one running is a leak the
+            # operator finds later with `ps`.
+            bridge.close()
+        if bridge.failures:
+            raise typer.Exit(code=1)
+
+
+def _mcp_path(explicit: Path | None) -> Path:
+    """Where MCP server configuration is read from."""
+    return explicit or (harness_home() / "mcp.toml")
+
+
+def _servers(explicit: Path | None) -> list[ServerConfig]:
+    """Read server configs from TOML, refusing anything malformed."""
+    path = _mcp_path(explicit)
+    if not path.exists():
+        return []
+    raw = tomllib.loads(path.read_text(encoding="utf-8"))
+    section = raw.get("mcp") or raw
+    entries = section.get("servers") or []
+    if not isinstance(entries, list):
+        console.print(f"[red]{path} should contain a list of {escape('[[mcp.servers]]')} tables[/]")
+        raise typer.Exit(code=1)
+    try:
+        return load_servers(entries)
+    except (TypeError, ValueError) as exc:
         console.print(f"[red]{path}: {exc}[/]")
         raise typer.Exit(code=1) from exc
