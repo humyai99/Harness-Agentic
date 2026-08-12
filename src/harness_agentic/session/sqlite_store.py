@@ -19,6 +19,8 @@ a file they had the agent read.
 from __future__ import annotations
 
 import json
+import os
+import platform
 import sqlite3
 import threading
 import time
@@ -47,6 +49,14 @@ from harness_agentic.session.store import SearchHit, SessionRecord, workspace_ke
 
 SCHEMA_VERSION = 1
 _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
+
+LEASE_STALE_AFTER_S = 3600.0
+"""When a lease is presumed abandoned on age alone.
+
+Deliberately far longer than any legitimate turn. Age is the fallback for the
+case liveness cannot settle -- a holder on another machine -- and stealing a
+lease from a writer that is merely slow is worse than waiting for it, because
+two writers appending to one session interleave its history."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -399,6 +409,14 @@ class SqliteSessionStore:
         which is soft. The CLI, the gateway and cron all write to the same
         database, and treating a busy session as a failure would mean throwing
         away a conversation because two surfaces spoke at once.
+
+        A lease outlives the process that took it, so an abandoned one has to be
+        reclaimable. The row is deleted in a ``finally``, but a ``kill -9``, an
+        OOM kill, or a container being reclaimed never reaches it -- and a lease
+        nobody will ever release used to make that session permanently unusable,
+        every future turn failing after a 30-second wait with "another writer
+        holds it". The holder is now recorded rather than just the time it
+        started, so a dead one can be identified instead of waited on forever.
         """
         key = f"lease:{session_id}"
         deadline = time.monotonic() + timeout_s
@@ -407,10 +425,15 @@ class SqliteSessionStore:
                 with self._write() as conn:
                     conn.execute(
                         "INSERT INTO state_meta(key, value) VALUES (?, ?)",
-                        (key, datetime.now(UTC).isoformat()),
+                        (key, _lease_token()),
                     )
                 break
             except sqlite3.IntegrityError:
+                if self._reclaim_lease(key):
+                    # Stolen from a holder that is provably gone. Round again to
+                    # take it, rather than assuming the steal won -- another
+                    # process may have been reclaiming it at the same moment.
+                    continue
                 if time.monotonic() >= deadline:
                     msg = f"another writer holds session {session_id}"
                     raise CompactionDeferred(msg) from None
@@ -421,6 +444,25 @@ class SqliteSessionStore:
             with suppress(sqlite3.Error), self._write() as conn:
                 conn.execute("DELETE FROM state_meta WHERE key = ?", (key,))
 
+    def _reclaim_lease(self, key: str) -> bool:
+        """Delete a lease whose holder is gone. Returns whether one was removed.
+
+        The delete is conditional on the exact token that was read, so if another
+        process reclaimed and retook the lease in between, this one removes
+        nothing rather than evicting the new holder.
+        """
+        with self._write() as conn:
+            row = conn.execute("SELECT value FROM state_meta WHERE key = ?", (key,)).fetchone()
+            if row is None:  # released while we were looking; the retry will take it
+                return False
+            token = str(row["value"])
+            if not _lease_is_abandoned(token):
+                return False
+            deleted = conn.execute(
+                "DELETE FROM state_meta WHERE key = ? AND value = ?", (key, token)
+            ).rowcount
+        return bool(deleted)
+
     def close(self) -> None:
         """Close the connection."""
         with self._lock:
@@ -428,6 +470,71 @@ class SqliteSessionStore:
 
 
 # -- helpers -------------------------------------------------------------------
+
+
+def _lease_token() -> str:
+    """Identify the holder of a lease, not just when it started.
+
+    A timestamp alone cannot distinguish a crashed writer from a slow one, and
+    guessing wrong in either direction is bad: too eager and two writers
+    interleave one session's history, too patient and a crash locks the session
+    out permanently.
+    """
+    return json.dumps(
+        {"pid": os.getpid(), "host": platform.node(), "at": datetime.now(UTC).isoformat()},
+        sort_keys=True,
+    )
+
+
+def _lease_is_abandoned(token: str, *, now: datetime | None = None) -> bool:
+    """Whether the writer that took this lease is provably gone.
+
+    Liveness first, age only as the fallback. On the same host the holder's
+    process can simply be asked about, which settles the common case -- a killed
+    gateway -- in microseconds and with certainty. Age covers a holder on another
+    machine, where there is nothing to ask, and is set far beyond any real turn
+    so that a slow writer is waited for rather than evicted.
+
+    A pid that has been reused reads as alive, so this waits instead of stealing.
+    That is the safe direction: the age fallback still resolves it eventually.
+    """
+    try:
+        held = json.loads(token)
+    except ValueError:
+        # A lease written before the holder was recorded. Age is all there is.
+        held = {"at": token}
+    if not isinstance(held, dict):  # pragma: no cover - defensive against odd rows
+        held = {"at": token}
+
+    if held.get("host") == platform.node() and isinstance(held.get("pid"), int):
+        return not _process_is_running(int(held["pid"]))
+
+    stamped = str(held.get("at") or "")
+    try:
+        started = datetime.fromisoformat(stamped)
+    except ValueError:
+        # An unparseable lease cannot be reasoned about, and refusing to reclaim
+        # it would leave the session stuck for good.
+        return True
+    if started.tzinfo is None:  # pragma: no cover - everything written here is aware
+        started = started.replace(tzinfo=UTC)
+    return ((now or datetime.now(UTC)) - started).total_seconds() > LEASE_STALE_AFTER_S
+
+
+def _process_is_running(pid: int) -> bool:
+    """Whether a local process exists. Unknown counts as running."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # It exists; it just is not ours to signal.
+        return True
+    except OSError:  # pragma: no cover - platform-dependent
+        return True
+    return True
 
 
 def _searchable(message: Message) -> str:
