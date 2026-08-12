@@ -270,6 +270,82 @@ def test_auto_safe_refuses_anything_that_ships_a_script(tmp_path: Path) -> None:
     assert not store.stage(with_script).auto_approvable
 
 
+def _landed(tmp_path: Path) -> ProposalStore:
+    """A store with `deploy-staging` already on disk, ready to be patched."""
+    store = ProposalStore(
+        pending_dir=tmp_path / "pending",
+        skills_dir=tmp_path / "skills",
+        autonomy=Autonomy.AUTO,
+    )
+    result = store.stage(_proposal())
+    store.approve(result.proposal.proposal_id)
+    return store
+
+
+def test_a_patch_that_matches_nothing_is_refused(tmp_path: Path) -> None:
+    """The bug: ``str.replace`` is silent when it finds nothing.
+
+    A patch whose ``old_string`` no longer matches staged clean, auto-approved,
+    reported "approved by operator", and changed absolutely nothing -- while
+    recording a revision event, which then put the skill under its 24-hour
+    cooldown. The trigger that produced the patch kept firing on the same unfixed
+    error and kept being refused as too recent, so the loop died for that skill
+    and nothing anywhere said so.
+    """
+    store = _landed(tmp_path)
+    before = (store._skills / "deploy-staging" / "SKILL.md").read_text(encoding="utf-8")
+
+    result = store.stage(
+        _proposal(
+            kind="patch", content=None, patches=(("## Pitfalls\nNone.", "## Pitfalls\nFixed."),)
+        )
+    )
+    assert result.blockers, "a patch that changes nothing must not stage clean"
+    assert not result.auto_approvable
+
+    applied = store.approve(result.proposal.proposal_id)
+    assert not applied.applied
+    assert "change nothing" in applied.reason
+    assert (store._skills / "deploy-staging" / "SKILL.md").read_text(encoding="utf-8") == before
+
+
+def test_an_ambiguous_patch_is_refused(tmp_path: Path) -> None:
+    # `replace(old, new, 1)` takes the first occurrence, and "the first one" is
+    # not a choice a proposal should be making implicitly.
+    store = _landed(tmp_path)
+    body = (store._skills / "deploy-staging" / "SKILL.md").read_text(encoding="utf-8")
+    repeated = next(line for line in body.splitlines() if line.strip() and body.count(line) > 1)
+
+    result = store.stage(_proposal(kind="patch", content=None, patches=((repeated, "changed"),)))
+
+    assert any("ambiguous" in blocker for blocker in result.blockers), result.blockers
+    assert not store.approve(result.proposal.proposal_id).applied
+
+
+def test_a_patch_that_does_match_still_lands(tmp_path: Path) -> None:
+    # The control has to let the real thing through, or it is just an outage.
+    store = _landed(tmp_path)
+    fix = (
+        "1. Run the deploy.\n\n## Pitfalls\nImagePullBackOff means the pull secret "
+        "expired; run `docker login ghcr.io` and repeat step 1."
+    )
+    result = store.stage(
+        _proposal(kind="patch", content=None, patches=(("1. Run the deploy.", fix),))
+    )
+    assert not result.blockers, result.blockers
+    assert store.approve(result.proposal.proposal_id).applied
+    after = (store._skills / "deploy-staging" / "SKILL.md").read_text(encoding="utf-8")
+    assert "ImagePullBackOff" in after
+
+
+def test_a_proposal_carrying_both_content_and_patches_is_refused(tmp_path: Path) -> None:
+    # The patches would be silently ignored, which is the same silent no-op
+    # wearing different clothes.
+    store = _landed(tmp_path)
+    result = store.stage(_proposal(patches=(("anything", "else"),)))
+    assert any("must not also carry patches" in blocker for blocker in result.blockers)
+
+
 def test_the_daily_creation_quota_is_enforced(tmp_path: Path) -> None:
     """The failure mode is fifty mediocre skills, not one catastrophic one."""
     store = ProposalStore(

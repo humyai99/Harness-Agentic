@@ -90,6 +90,40 @@ class SkillProposal:
     source_session_id: str = ""
     created_at: float = 0.0
 
+    def patch_problems(self, existing_body: str) -> tuple[str, ...]:
+        """Reasons this proposal's patches would not do what they claim.
+
+        ``str.replace`` is silent when it finds nothing, so a patch whose
+        ``old_string`` no longer matches used to stage clean, auto-approve, report
+        "approved", and change absolutely nothing -- while recording a revision
+        event, which put the skill under its cooldown. The trigger that produced
+        the patch then kept firing on the same unfixed error and kept being
+        refused as too recent. The loop dies for that skill and nothing says so.
+
+        Ambiguity is refused for the same reason. ``replace(old, new, 1)`` takes
+        the first occurrence, and "the first one" is not a choice a proposal
+        should be making implicitly.
+        """
+        if self.content is not None:
+            if not self.patches:
+                return ()
+            both = (
+                "a proposal carrying full content must not also carry patches; "
+                "the patches would be ignored"
+            )
+            return (both,)
+        problems: list[str] = []
+        for old, _ in self.patches:
+            found = existing_body.count(old)
+            if found == 0:
+                problems.append(f"the text to replace is not in the current skill: {_excerpt(old)}")
+            elif found > 1:
+                problems.append(
+                    f"the text to replace appears {found} times, so which one is "
+                    f"meant is ambiguous: {_excerpt(old)}"
+                )
+        return tuple(problems)
+
     def candidate(self, *, existing_body: str = "") -> CandidateSkill:
         """Render this proposal as something the validator can check."""
         content = self.content
@@ -194,6 +228,9 @@ class ProposalStore:
         blockers: list[str] = []
         if validation.blocked:
             blockers.append("validation blocked this proposal")
+        # Before auto-approval decides anything: a patch that matches nothing
+        # would land as a successful no-op and burn the revision budget.
+        blockers.extend(proposal.patch_problems(existing_body))
 
         auto = self._auto_approvable(proposal, validation)
         self._write_staged(proposal, validation, duplicate)
@@ -282,6 +319,13 @@ class ProposalStore:
             return ApplyResult(False, None, f"no proposal {proposal_id!r}")
 
         existing_body = self._read_body(proposal.target_name)
+        # Re-checked here and not only at staging time, because the skill may have
+        # changed since -- and a patch that no longer matches must be refused
+        # rather than written as an unchanged file reported as approved.
+        if problems := proposal.patch_problems(existing_body):
+            return ApplyResult(
+                False, None, "this patch would change nothing: " + "; ".join(problems)
+            )
         candidate = proposal.candidate(existing_body=existing_body)
         validation = validate(candidate)
         if validation.blocked:
@@ -470,6 +514,12 @@ def _within(timestamps: Sequence[float], window_s: float) -> list[float]:
     """Timestamps inside the trailing window."""
     cutoff = time.time() - window_s
     return [t for t in timestamps if t >= cutoff]
+
+
+def _excerpt(text: str, *, limit: int = 60) -> str:
+    """A short single-line quotation, for naming which patch failed."""
+    flat = " ".join(text.split())
+    return repr(flat if len(flat) <= limit else flat[:limit] + "…")
 
 
 def _proposal_to_json(proposal: SkillProposal) -> dict[str, Any]:
