@@ -103,7 +103,13 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "S603", "D1", "ANN", "PLR2004", "ARG", "INP001", "TC"]
+# Tests define fake credentials (S105-107), import locally to keep a case
+# self-contained (PLC0415), and reach into privates to assert on state a
+# public API deliberately does not expose (SLF001).
+"tests/**" = [
+  "S101", "S105", "S106", "S107", "S603", "D1", "ANN", "PLR2004", "ARG",
+  "INP001", "TC", "PLC0415", "SLF001",
+]
 "scripts/**" = ["T20", "INP001", "D1"]
 # Typer's API *is* calls-in-defaults, and a CLI command legitimately takes many
 # flags. Fighting the framework here would make the commands harder to read.

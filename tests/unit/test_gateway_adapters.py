@@ -104,7 +104,7 @@ async def test_telegram_advances_its_offset_only_after_yielding() -> None:
     # past 11 only once 11 had been handed on, and will move past 12 only once
     # 12 has. That is the property: a crash here replays update 12 rather than
     # losing it, and the deduplicator upstream absorbs the replay.
-    assert adapter._offset == 12  # noqa: SLF001
+    assert adapter._offset == 12
 
 
 async def test_telegram_reports_api_errors_without_leaking_the_token() -> None:

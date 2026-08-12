@@ -30,7 +30,7 @@ def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
     and are deselected by default; they re-enable access by overriding this
     fixture.
     """
-    import httpx  # noqa: PLC0415  -- imported here so collection stays cheap
+    import httpx  # imported here so collection stays cheap
 
     real_sync = httpx.Client.send
     real_async = httpx.AsyncClient.send

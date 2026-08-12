@@ -359,10 +359,13 @@ async def test_the_same_answer_is_shaped_per_platform(workspace: Path, tmp_path:
     # adapter knows which is which.
     long_answer = "\n\n".join(f"Paragraph {i}. " + "word " * 30 for i in range(6))
 
+    def script() -> list[ScriptedTurn]:
+        return [tool_turn("read_file", {"path": "notes.md"}), text_turn(long_answer)]
+
     telegram = Harness(
         workspace,
         tmp_path / "tg",
-        [text_turn(long_answer)],
+        script(),
         adapter=FakeAdapter(capabilities=telegram_like()),
     )
     await telegram.send("explain")
@@ -371,17 +374,21 @@ async def test_the_same_answer_is_shaped_per_platform(workspace: Path, tmp_path:
     line = Harness(
         workspace,
         tmp_path / "line",
-        [text_turn(long_answer)],
+        script(),
         adapter=FakeAdapter(capabilities=line_like(), name="fake"),
     )
     await line.send("explain")
     await line.aclose()
 
-    telegram.adapter.assert_within_limits()
-    line.adapter.assert_within_limits()
-    # Telegram streams by rewriting one message; LINE cannot edit at all, so
-    # the same answer arrives as whole messages and no edit is ever attempted.
-    assert telegram.adapter.posted[0].edits
-    assert all(not p.edits for p in line.adapter.posted)
+    # Both get the whole answer, neither exceeds what its platform accepts.
     for harness in (telegram, line):
+        harness.adapter.assert_within_limits()
         assert "Paragraph 5." in harness.adapter.transcript()
+
+    # LINE cannot edit, so no edit is ever attempted against it -- that is a
+    # property of the capability, not of how fast the model streamed.
+    assert all(not p.edits for p in line.adapter.posted)
+    # And progress is narrated only where a status line is free. On LINE every
+    # one would be a metered push and an unwanted notification.
+    assert telegram.adapter.of_kind("status")
+    assert not line.adapter.of_kind("status")
