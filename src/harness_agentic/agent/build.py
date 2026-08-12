@@ -46,6 +46,7 @@ from harness_agentic.providers.resolver import TransportResolver
 from harness_agentic.session.sqlite_store import SqliteSessionStore
 from harness_agentic.tools.approval import ApprovalPolicy
 from harness_agentic.tools.builtin import install_builtins
+from harness_agentic.tools.builtin.browser import install_browser_tools
 from harness_agentic.tools.builtin.data import (
     install_http_tools,
     install_kb_tools,
@@ -57,6 +58,7 @@ from harness_agentic.tools.dispatch import ToolExecutor
 from harness_agentic.tools.registry import ToolRegistry, registry
 
 if TYPE_CHECKING:
+    from harness_agentic.browser.driver import Driver
     from harness_agentic.data.kb import Retriever
     from harness_agentic.data.sql import SqlSource
     from harness_agentic.envs.base import ExecEnvironment
@@ -143,6 +145,7 @@ def build_agent(
     http_fetcher: Fetcher | None = None,
     delegation: DelegationLimits | None = None,
     mcp_servers: Sequence[ServerConfig] = (),
+    browser: Driver | None = None,
     surface: str = "cli",
     emit: EventSink = null_sink,
     approval: ApprovalPolicy | None = None,
@@ -194,6 +197,8 @@ def build_agent(
         install_kb_tools(tool_registry, retriever)
     if http_fetcher is not None:
         install_http_tools(tool_registry, http_fetcher)
+    if browser is not None:
+        install_browser_tools(tool_registry, browser)
 
     bridge: McpBridge | None = None
     if mcp_servers:

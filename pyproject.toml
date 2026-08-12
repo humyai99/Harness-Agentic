@@ -34,9 +34,10 @@ dependencies = [
 tokens = ["tiktoken>=0.8"]
 keyring = ["keyring>=25"]
 docker = ["docker>=7"]
+browser = ["playwright>=1.48,<2"]
 repl = ["prompt_toolkit>=3.0.48,<4"]
 gateway = ["uvicorn>=0.30,<1", "websockets>=13,<16"]
-all = ["harness-agentic[tokens,keyring,docker,repl,gateway]"]
+all = ["harness-agentic[tokens,keyring,docker,repl,gateway,browser]"]
 
 [project.scripts]
 harn = "harness_agentic.cli.main:main"
@@ -136,6 +137,12 @@ ignore = [
 # Small stdlib helpers imported at the point of use, so the module graph
 # stays shallow -- these are leaf utilities, not dependencies.
 "src/harness_agentic/net/*.py" = ["PLC0415"]
+# playwright is the [browser] extra -- several hundred megabytes -- imported
+# inside the one method that needs it so the rest stays usable without it.
+"src/harness_agentic/browser/driver.py" = ["PLC0415"]
+# One installer registering six closely-related tools reads better as one
+# function than as six with a shared helper threaded between them.
+"src/harness_agentic/tools/builtin/browser.py" = ["PLC0415", "PLR0915"]
 # Plugin discovery imports importlib.metadata on demand: reading entry points
 # is slow and only matters when plugins are actually being loaded.
 "src/harness_agentic/plugins/loader.py" = ["PLC0415"]
@@ -174,7 +181,7 @@ files = ["src"]
 [[tool.mypy.overrides]]
 module = [
   "docker.*", "tiktoken.*", "keyring.*", "prompt_toolkit.*", "tomli_w.*",
-  "uvicorn.*", "websockets.*",
+  "uvicorn.*", "websockets.*", "playwright.*",
 ]
 ignore_missing_imports = true
 
