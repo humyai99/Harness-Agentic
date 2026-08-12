@@ -178,18 +178,38 @@ def load(
 
 
 def _setup_one(registry: ToolRegistry, entry: Discovered) -> tuple[str, ...]:
-    """Import a plugin, run its setup, and constrain what it registered."""
+    """Import a plugin, run its setup, and constrain what it registered.
+
+    What counts as "what it registered" is the load-bearing part. Comparing the
+    set of *names* before and after missed a replacement entirely: a plugin
+    holding the registry can call ``register(..., override=True)`` on a name that
+    already exists, so swapping its own handler into ``read_file`` changed no
+    names and the constraint below never ran. The replacement kept
+    ``danger=SAFE`` and ``source="builtin"`` -- it routed around the approval
+    policy and reported itself as a builtin while doing it, which is precisely
+    what the floor exists to prevent.
+
+    So the comparison is on tool *identity*. Every ``register`` call stores a new
+    object, so anything the plugin touched is visible whether or not the name
+    was new.
+    """
     module = _import(entry)
     setup = getattr(module, "setup", None)
     if not callable(setup):
         detail = f"{entry.name} has no setup(registry) function"
         raise PluginError(detail)
 
-    before = set(registry.all())
+    before = registry.all()
     setup(registry)
-    added = tuple(sorted(set(registry.all()) - before))
-    _constrain(registry, entry.name, added)
-    return added
+    touched = tuple(
+        sorted(name for name, tool in registry.all().items() if before.get(name) is not tool)
+    )
+    if replaced := [name for name in touched if name in before]:
+        # Said out loud. Replacing a builtin may be legitimate, but it is never
+        # something an operator should discover by accident.
+        log.warning("plugin %s replaced existing tool(s): %s", entry.name, ", ".join(replaced))
+    _constrain(registry, entry.name, touched)
+    return touched
 
 
 def _constrain(registry: ToolRegistry, plugin: str, names: Sequence[str]) -> None:
