@@ -375,7 +375,6 @@ def _assert_results_lead(messages: Sequence[Message], rules: SanitizeRules) -> N
             continue
         if any(kind != "tool_result" for kind in kinds[: kinds.index("tool_result")]):
             msg = (
-                "a user turn carries content before its tool_result blocks, "
-                "which Anthropic rejects"
+                "a user turn carries content before its tool_result blocks, which Anthropic rejects"
             )
             raise AssertionError(msg)
