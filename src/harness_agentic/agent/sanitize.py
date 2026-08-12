@@ -53,6 +53,7 @@ class SanitizeReport:
     dropped_empty_messages: int = 0
     merged_messages: int = 0
     repaired_arguments: int = 0
+    reordered_tool_results: int = 0
 
     @property
     def clean(self) -> bool:
@@ -65,6 +66,7 @@ class SanitizeReport:
                 self.dropped_empty_messages,
                 self.merged_messages,
                 self.repaired_arguments,
+                self.reordered_tool_results,
             )
         )
 
@@ -83,6 +85,9 @@ class SanitizeReport:
             else "",
             f"{self.merged_messages} merged message(s)" if self.merged_messages else "",
             f"{self.repaired_arguments} repaired argument(s)" if self.repaired_arguments else "",
+            f"{self.reordered_tool_results} reordered turn(s)"
+            if self.reordered_tool_results
+            else "",
         ]
         return ", ".join(p for p in parts if p)
 
@@ -103,6 +108,7 @@ def sanitize(
         "dropped_empty_messages": 0,
         "merged_messages": 0,
         "repaired_arguments": 0,
+        "reordered_tool_results": 0,
     }
 
     working = list(messages)
@@ -114,6 +120,9 @@ def sanitize(
     working = _drop_empty(working, rules, counts)
     if rules.require_alternating_roles:
         working = _merge_adjacent(working, rules, counts)
+    if rules.tool_results_in_user_message:
+        # Last, so it sees the merged shape as well as the arriving one.
+        working = _order_tool_results(working, rules, counts)
 
     return working, SanitizeReport(**counts)
 
@@ -260,6 +269,10 @@ def _merge_adjacent(
     Anthropic rejects two user turns in a row, and our ``tool`` role becomes a
     user turn there -- so a tool result followed by the user's next message is
     two user turns unless they are merged here.
+
+    Merging preserves order, which for a user turn carrying tool results is not
+    quite enough on its own -- see :func:`_order_tool_results`, which runs after
+    this and fixes up the order however it arose.
     """
     out: list[Message] = []
     for message in messages:
@@ -270,6 +283,38 @@ def _merge_adjacent(
             counts["merged_messages"] += 1
             continue
         out.append(message)
+    return out
+
+
+def _order_tool_results(
+    messages: list[Message], rules: SanitizeRules, counts: dict[str, int]
+) -> list[Message]:
+    """Put ``tool_result`` blocks first in every turn that becomes a user turn.
+
+    Anthropic requires them to lead the content array, so anything ahead of one
+    is a 400 -- and there are two ways to get there. Merging preserves order, so
+    a user turn joined in front of a tool turn puts its text first; and a single
+    message can simply arrive holding a result behind something else.
+
+    Repaired rather than asserted against, because this module's job is to
+    produce a history the provider accepts. Ordering is stable within each group,
+    so results keep their order relative to each other and so does everything
+    else; only the two groups move.
+    """
+    out: list[Message] = []
+    for message in messages:
+        blocks = message.content
+        if _wire_role(message.role, rules) != "user" or not message.tool_results():
+            out.append(message)
+            continue
+        results = [b for b in blocks if isinstance(b, ToolResultBlock)]
+        rest = [b for b in blocks if not isinstance(b, ToolResultBlock)]
+        reordered: tuple[ContentBlock, ...] = (*results, *rest)
+        if reordered == blocks:
+            out.append(message)
+            continue
+        counts["reordered_tool_results"] += 1
+        out.append(replace(message, content=reordered))
     return out
 
 
@@ -315,3 +360,22 @@ def assert_valid(messages: Sequence[Message], rules: SanitizeRules) -> None:
                 msg = f"consecutive {current!r} turns survived sanitizing"
                 raise AssertionError(msg)
             previous = current
+
+    if rules.tool_results_in_user_message:
+        _assert_results_lead(messages, rules)
+
+
+def _assert_results_lead(messages: Sequence[Message], rules: SanitizeRules) -> None:
+    """Raise if any user-role turn carries content ahead of its tool results."""
+    for message in messages:
+        if _wire_role(message.role, rules) != "user":
+            continue
+        kinds = [block.kind for block in message.content]
+        if "tool_result" not in kinds:
+            continue
+        if any(kind != "tool_result" for kind in kinds[: kinds.index("tool_result")]):
+            msg = (
+                "a user turn carries content before its tool_result blocks, "
+                "which Anthropic rejects"
+            )
+            raise AssertionError(msg)

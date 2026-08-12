@@ -151,6 +151,58 @@ def test_tool_result_and_user_turn_merge_for_anthropic() -> None:
     assert_valid(out, ANTHROPIC)
 
 
+def test_a_merged_user_turn_puts_its_tool_results_first() -> None:
+    """Anthropic requires ``tool_result`` blocks to lead the content array.
+
+    Merging preserves order, so text merged in ahead of a result would be a 400.
+    Nothing in this codebase produces that order today -- a segment never starts
+    with a tool result, and orphans are dropped before merging -- but that is a
+    property of compaction and of the pairing pass rather than of the merge, so
+    the merge imposes it instead of trusting it.
+    """
+    history = [
+        _m("user", TextBlock("go")),
+        _m("assistant", ToolUseBlock(id="c1", name="t")),
+        # A user turn sitting between the call and its result: the shape the
+        # merge must not turn into an invalid request.
+        _m("user", TextBlock("actually, also do this")),
+        _m("tool", ToolResultBlock(tool_use_id="c1", text="done")),
+    ]
+    out, _ = sanitize(history, ANTHROPIC, now=NOW)
+
+    merged = next(m for m in out if m.tool_results())
+    kinds = [block.kind for block in merged.content]
+    assert kinds[0] == "tool_result", f"got {kinds}"
+    assert "text" in kinds, "the user's text must survive, not be dropped"
+    assert_valid(out, ANTHROPIC)
+
+
+def test_assert_valid_rejects_content_before_a_tool_result() -> None:
+    # The guard has to fail on the bad shape, or it is not a guard.
+    broken = [
+        _m("user", TextBlock("go")),
+        _m("assistant", ToolUseBlock(id="c1", name="t")),
+        _m("tool", TextBlock("chatter"), ToolResultBlock(tool_use_id="c1", text="done")),
+    ]
+    with pytest.raises(AssertionError, match="before its tool_result"):
+        assert_valid(broken, ANTHROPIC)
+
+
+def test_a_turn_that_arrives_with_its_result_behind_something_is_repaired() -> None:
+    # The other way into the bad shape, and the one a merge cannot explain: a
+    # single message simply holding a result behind another block.
+    history = [
+        _m("user", TextBlock("go")),
+        _m("assistant", ToolUseBlock(id="c1", name="t")),
+        _m("tool", TextBlock("chatter"), ToolResultBlock(tool_use_id="c1", text="done")),
+    ]
+    out, report = sanitize(history, ANTHROPIC, now=NOW)
+
+    assert report.reordered_tool_results == 1
+    assert not report.clean
+    assert_valid(out, ANTHROPIC)
+
+
 def test_chat_completions_keeps_the_tool_role_separate() -> None:
     history = [
         _m("user", TextBlock("go")),
