@@ -10,8 +10,8 @@ from __future__ import annotations
 import typer
 
 from harness_agentic.cli import chat as chat_commands
+from harness_agentic.cli import inspect as inspect_commands
 from harness_agentic.cli.render import console
-from harness_agentic.constants import active_profile, harness_home
 from harness_agentic.version import __version__
 
 app = typer.Typer(
@@ -42,20 +42,9 @@ def _root(
     """Harness-Agentic command line."""
 
 
-@app.command()
-def doctor() -> None:
-    """Report where state lives and which profile is active.
-
-    Grows into the full environment check (credential sources, docker
-    reachability, database integrity) as those subsystems land. It never prints
-    a secret value -- only where one was resolved from.
-    """
-    console.print(f"[bold]harness-agentic[/bold] {__version__}")
-    console.print(f"home    {harness_home()}")
-    console.print(f"profile {active_profile()}")
-
-
 chat_commands.register(app)
+inspect_commands.register(app)
+inspect_commands.register_doctor(app)
 
 
 def main() -> None:

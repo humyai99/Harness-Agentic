@@ -25,9 +25,7 @@ from harness_agentic.prompts.builder import (
     volatile_fragment,
     workspace_fragment,
 )
-from harness_agentic.providers.catalog import parse_model_ref
-from harness_agentic.providers.credentials import SecretResolver, resolve_credentials
-from harness_agentic.providers.transports.anthropic import AnthropicTransport
+from harness_agentic.providers.resolver import TransportResolver
 from harness_agentic.session.store import JsonlSessionStore, SessionStore
 from harness_agentic.tools.approval import ApprovalPolicy
 from harness_agentic.tools.builtin import install_builtins
@@ -84,24 +82,6 @@ class _ContextAdapter:
         return self._inner.approve(request)
 
 
-def build_transport(
-    provider: str, *, resolver: SecretResolver, clock: Clock | None = None
-) -> ProviderTransport:
-    """Construct the transport for one provider.
-
-    The only place a provider name maps to a class. Adding a provider means
-    adding a branch here and an entry in the catalog -- nowhere else.
-    """
-    credentials = resolve_credentials(provider, resolver)
-    if provider == "anthropic":
-        return AnthropicTransport(credentials=credentials, clock=clock)
-    msg = (
-        f"provider {provider!r} has no transport yet; anthropic is available, "
-        f"and openai-compatible providers land in M2"
-    )
-    raise NotImplementedError(msg)
-
-
 @dataclass
 class AgentBundle:
     """A runner plus the pieces a surface needs to drive and inspect it."""
@@ -134,17 +114,11 @@ def build_agent(
     exercised in tests with ``FakeTransport`` and no API key.
     """
     the_clock = clock or SystemClock()
-    resolver = SecretResolver()
-    supplied = transports or {}
-
-    def transport_for(reference: str) -> ModelChoice:
-        provider, name = parse_model_ref(reference)
-        transport = supplied.get(provider) or build_transport(
-            provider, resolver=resolver, clock=the_clock
-        )
-        return ModelChoice(transport=transport, model=name, provider=provider)
-
-    chain = [transport_for(model), *(transport_for(ref) for ref in fallbacks)]
+    resolver = TransportResolver(clock=the_clock, overrides=transports)
+    chain = [
+        ModelChoice(transport=r.transport, model=r.model, provider=r.provider)
+        for r in resolver.chain(model, fallbacks)
+    ]
 
     tool_registry = install_builtins(registry)
     resolved_tools = tool_registry.resolve(enabled_toolsets=list(toolsets), surface=surface)

@@ -172,23 +172,48 @@ class FakeTransport(ProviderTransport):
     def build_request(self, request: CompletionRequest) -> WireRequest:
         """Render a readable stand-in for a wire body.
 
-        Not a real API shape, but a faithful reflection of what the loop
-        decided -- which is what assertions actually care about.
+        Not a real API shape, but it obeys the same contract the real
+        transports do -- the shared suite in ``tests/contract`` runs against
+        this one too. That matters more than it sounds: a fake that quietly
+        diverges makes every test written against it a false positive.
         """
-        return {
+        wire: WireRequest = {
             "model": request.model,
             "system": [
                 {"text": s.text, "cache_breakpoint": s.cache_breakpoint}
                 for s in request.system.segments
             ],
-            "messages": [
-                {"role": m.role, "blocks": [b.kind for b in m.content]} for m in request.messages
-            ],
-            "tools": [t.name for t in request.tools],
-            "tool_choice": request.tool_choice,
+            "messages": [self._encode_message(m) for m in request.messages],
             "max_output_tokens": request.max_output_tokens,
             "stream": request.stream,
         }
+        if request.tools:
+            wire["tools"] = [
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": dict(tool.parameters),
+                }
+                for tool in request.tools
+            ]
+            wire["tool_choice"] = request.tool_choice
+        wire.update(request.extra)
+        return wire
+
+    @staticmethod
+    def _encode_message(message: Message) -> dict[str, Any]:
+        """Render one message, dropping what a real provider would reject."""
+        blocks: list[dict[str, Any]] = []
+        for block in message.content:
+            if isinstance(block, ThinkingBlock) and not block.replayable:
+                continue
+            entry: dict[str, Any] = {"kind": block.kind}
+            for field_name in ("text", "name", "arguments", "tool_use_id", "id"):
+                value = getattr(block, field_name, None)
+                if value:
+                    entry[field_name] = value if isinstance(value, str) else dict(value)
+            blocks.append(entry)
+        return {"role": message.role, "blocks": blocks}
 
     def normalize_response(self, raw: Mapping[str, Any]) -> ModelResponse:
         """Round-trip a recorded fake response."""
@@ -198,9 +223,24 @@ class FakeTransport(ProviderTransport):
         return accumulator.finalize()
 
     def parse_stream(self, chunks: Iterator[Mapping[str, Any]]) -> Iterator[StreamEvent]:
-        """Convert recorded frames back into events."""
+        """Convert recorded frames back into events.
+
+        Always terminates with usage then done, even for an empty stream --
+        the accumulator depends on that ordering to finish a response.
+        """
+        usage = Usage()
+        finish: FinishReason = "stop"
         for chunk in chunks:
-            yield from self._events(_turn_from_mapping(chunk))
+            turn = _turn_from_mapping(chunk)
+            for event in self._events(turn):
+                if isinstance(event, UsageUpdate):
+                    usage = event.usage
+                elif isinstance(event, StreamDone):
+                    finish = event.finish_reason
+                else:
+                    yield event
+        yield UsageUpdate(usage)
+        yield StreamDone(finish_reason=finish, model=self._model)
 
     # -- I/O ----------------------------------------------------------------
 
