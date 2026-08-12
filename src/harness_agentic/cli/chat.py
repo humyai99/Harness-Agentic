@@ -20,6 +20,7 @@ import typer
 from harness_agentic.agent.build import AgentBundle, build_agent
 from harness_agentic.cli.events import ConsoleRenderer
 from harness_agentic.cli.render import console, err_console
+from harness_agentic.config import ConfigError, Settings, load_settings
 from harness_agentic.constants import ensure_dirs
 from harness_agentic.errors import CredentialError, HarnessError
 from harness_agentic.tools.approval import ApprovalPolicy, Mode
@@ -80,11 +81,11 @@ def register(app: typer.Typer) -> None:
     @app.command()
     def run(
         prompt: str = typer.Argument(..., help="What the agent should do."),
-        model: str = typer.Option(DEFAULT_MODEL, "--model", "-m"),
-        toolsets: str = typer.Option("file,terminal", "--toolsets"),
+        model: str = typer.Option("", "--model", "-m", help="Overrides model.default."),
+        toolsets: str = typer.Option("", "--toolsets", help="Overrides tools.toolsets."),
         workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w"),
         env: str = typer.Option(
-            "local", "--env", help="Where tools run: 'local' on this host, or 'docker'."
+            "", "--env", help="Where tools run: 'local' or 'docker'. Overrides tools.env."
         ),
         stream: bool = typer.Option(default=True, help="Stream the answer as it arrives."),
         thinking: bool = typer.Option(default=False, help="Show the model's reasoning."),
@@ -114,11 +115,11 @@ def register(app: typer.Typer) -> None:
 
     @app.command()
     def chat(
-        model: str = typer.Option(DEFAULT_MODEL, "--model", "-m"),
-        toolsets: str = typer.Option("file,terminal", "--toolsets"),
+        model: str = typer.Option("", "--model", "-m", help="Overrides model.default."),
+        toolsets: str = typer.Option("", "--toolsets", help="Overrides tools.toolsets."),
         workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w"),
         env: str = typer.Option(
-            "local", "--env", help="Where tools run: 'local' on this host, or 'docker'."
+            "", "--env", help="Where tools run: 'local' or 'docker'. Overrides tools.env."
         ),
         stream: bool = typer.Option(default=True, help="Stream answers as they arrive."),
         thinking: bool = typer.Option(default=False, help="Show the model's reasoning."),
@@ -166,11 +167,32 @@ def _build(
     thinking: bool,
     *,
     approve_all: bool,
-    backend: str = "local",
+    backend: str = "",
 ) -> AgentBundle:
-    """Assemble the agent, reporting a missing credential as advice not a stack."""
+    """Assemble the agent, reporting a missing credential as advice not a stack.
+
+    Flags override configuration rather than replacing it. An empty flag means
+    "not given", which is why the defaults are empty strings and not the schema's
+    values -- otherwise a config file could never change a default, because the
+    flag would always be sitting on top of it saying the same thing.
+    """
     profile = ensure_dirs()
-    environment = _environment(backend, workspace.resolve())
+    try:
+        loaded = load_settings(
+            workspace=workspace.resolve(),
+            overrides={
+                "model.default": model or None,
+                "tools.toolsets": _split(toolsets) or None,
+                "tools.env": backend or None,
+            },
+        )
+    except ConfigError as exc:
+        err_console.print(f"[red]{exc}[/]")
+        sys.exit(1)
+    for problem in loaded.problems:
+        err_console.print(f"[yellow]unreadable config:[/] {problem}")
+    settings = loaded.settings
+    environment = _environment(settings.tools.env, workspace.resolve(), settings)
     policy = (
         ApprovalPolicy(surface="cli", modes={"cli": Mode.ALLOW})
         if approve_all
@@ -183,22 +205,29 @@ def _build(
         )
     try:
         return build_agent(
-            model=model,
+            model=settings.model.default,
             workspace=workspace.resolve(),
             sessions_dir=profile / "sessions",
-            toolsets=[t.strip() for t in toolsets.split(",") if t.strip()],
+            toolsets=settings.enabled_toolsets(),
+            fallbacks=settings.model.fallbacks,
             surface="cli",
             emit=ConsoleRenderer(show_thinking=thinking),
             approval=policy,
-            stream=stream,
+            stream=stream and settings.model.stream,
             env=environment,
+            max_iterations=settings.model.max_iterations,
         )
     except CredentialError as exc:
         err_console.print(f"[red]{exc}[/]")
         sys.exit(1)
 
 
-def _environment(backend: str, workspace: Path) -> ExecEnvironment | None:
+def _split(raw: str) -> list[str]:
+    """A comma-separated flag as a list, or empty when the flag was not given."""
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def _environment(backend: str, workspace: Path, settings: Settings) -> ExecEnvironment | None:
     """Build the execution environment named by ``--env``.
 
     ``None`` means "let build_agent use the local one", which keeps the default
@@ -215,7 +244,12 @@ def _environment(backend: str, workspace: Path) -> ExecEnvironment | None:
         err_console.print(f"[red]unknown --env {backend!r}[/]; use 'local' or 'docker'")
         sys.exit(1)
 
-    from harness_agentic.envs.docker import DockerEnvironment, DockerUnavailable, probe
+    from harness_agentic.envs.docker import (
+        DockerEnvironment,
+        DockerLimits,
+        DockerUnavailable,
+        probe,
+    )
 
     try:
         version = probe()
@@ -226,6 +260,16 @@ def _environment(backend: str, workspace: Path) -> ExecEnvironment | None:
             "`terminal` is then unsandboxed.[/]"
         )
         sys.exit(1)
-    sandbox = DockerEnvironment(workspace=workspace)
+    sandbox = DockerEnvironment(
+        workspace=workspace,
+        image=settings.docker.image,
+        network=settings.docker.network,
+        read_only_root=settings.docker.read_only_root,
+        limits=DockerLimits(
+            memory=settings.docker.memory,
+            cpus=settings.docker.cpus,
+            pids=settings.docker.pids,
+        ),
+    )
     err_console.print(f"[green]docker {version}[/]: {sandbox.describe()}")
     return sandbox

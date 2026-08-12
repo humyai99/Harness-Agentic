@@ -10,6 +10,7 @@ from __future__ import annotations
 import typer
 
 from harness_agentic.cli import chat as chat_commands
+from harness_agentic.cli import config as config_commands
 from harness_agentic.cli import extend as extend_commands
 from harness_agentic.cli import gateway as gateway_commands
 from harness_agentic.cli import inspect as inspect_commands
@@ -47,6 +48,7 @@ def _root(
 
 
 chat_commands.register(app)
+config_commands.register(app)
 inspect_commands.register(app)
 inspect_commands.register_doctor(app)
 gateway_commands.register(app)
