@@ -64,26 +64,34 @@ def test_a_public_url_passes() -> None:
 
 
 @pytest.mark.parametrize(
-    ("address", "why"),
+    ("address", "expected"),
     [
-        ("127.0.0.1", "loopback"),
-        ("10.0.0.5", "private"),
-        ("192.168.1.1", "private"),
-        ("172.16.0.1", "private"),
-        ("169.254.169.254", "metadata"),
+        ("127.0.0.1", "the loopback interface"),
+        ("10.0.0.5", "a private network"),
+        ("192.168.1.1", "a private network"),
+        ("172.16.0.1", "a private network"),
         ("0.0.0.0", "unspecified"),  # noqa: S104 - the point is that it is refused
-        ("::1", "loopback"),
+        ("::1", "the loopback interface"),
         ("fe80::1", "link-local"),
-        ("::ffff:127.0.0.1", "loopback wearing an IPv6 hat"),
+        # Loopback wearing an IPv6 hat. Which IPv6 flags are set for a mapped
+        # address varies by platform, so the reason has to come from the mapped
+        # address rather than from the flags.
+        ("::ffff:127.0.0.1", "the loopback interface"),
     ],
 )
-def test_a_name_resolving_inward_is_refused(address: str, why: str) -> None:
+def test_a_name_resolving_inward_is_refused(address: str, expected: str) -> None:
     # The check is on the resolved address, not the name. A denylist of names
     # stops nothing: anyone can point a public name at 127.0.0.1.
     policy = UrlPolicy(resolver=resolving(**{"innocent.test": address}))
-    with pytest.raises(UrlRefused) as caught:
+    with pytest.raises(UrlRefused, match=re.escape(expected)):
         policy.check("http://innocent.test/")
-    assert address in str(caught.value), why
+    assert internal_reason(ipaddress.ip_address(address)) == expected
+
+
+def test_the_metadata_address_is_refused_by_name() -> None:
+    policy = UrlPolicy(resolver=resolving(**{"innocent.test": "169.254.169.254"}))
+    with pytest.raises(UrlRefused, match="metadata service"):
+        policy.check("http://innocent.test/")
 
 
 def test_the_metadata_service_is_refused_even_when_private_is_allowed() -> None:

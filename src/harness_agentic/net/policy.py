@@ -169,22 +169,27 @@ def internal_reason(address: IpAddress) -> str:  # noqa: PLR0911
     One branch per reason so the refusal message names it. "10.0.0.5, which is
     a private network" tells an operator what to change; "blocked" does not.
     """
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        # Checked first, and delegated to the mapped address. `::ffff:127.0.0.1`
+        # is loopback wearing an IPv6 hat, and which of the IPv6 flags happen to
+        # be set for it varies by platform -- so asking the IPv4 address the
+        # question is both more accurate and stable across them.
+        return internal_reason(address.ipv4_mapped) or "an IPv4-mapped address"
+    # Most specific reason first. Several of these overlap -- 0.0.0.0 is both
+    # unspecified and private, fe80::1 is both link-local and private -- and the
+    # narrower answer is the one an operator can act on.
     if address.is_loopback:
         return "the loopback interface"
-    if address.is_link_local:
-        return "link-local"
-    if address.is_private:
-        return "a private network"
-    if address.is_reserved:
-        return "reserved"
-    if address.is_multicast:
-        return "multicast"
     if address.is_unspecified:
         return "unspecified"
-    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
-        # ``::ffff:127.0.0.1`` is loopback wearing an IPv6 hat, and the flags
-        # above do not catch it.
-        return internal_reason(address.ipv4_mapped) or ""
+    if address.is_link_local:
+        return "link-local"
+    if address.is_multicast:
+        return "multicast"
+    if address.is_reserved:
+        return "reserved"
+    if address.is_private:
+        return "a private network"
     return ""
 
 
