@@ -173,6 +173,30 @@ def test_pairing_survives_a_restart(tmp_path: Path) -> None:
     assert state.stat().st_mode & 0o077 == 0
 
 
+def test_a_non_ascii_pairing_attempt_is_refused_not_a_crash() -> None:
+    """The bug: ``hmac.compare_digest`` raises ``TypeError`` on non-ASCII text.
+
+    The candidate is whatever an unauthenticated stranger typed after ``/pair``,
+    so ``/pair สวัสดี`` raised out of the router instead of being answered -- a
+    remote sender crashing the handler with one message, and on a Thai deployment
+    that is the ordinary case rather than an edge one. It needs an outstanding
+    code to reach the comparison, which is exactly the state an operator is in
+    while inviting somebody.
+    """
+    auth = Authorizer(platforms={"fake": PlatformAuth()})
+    auth.issue_code("fake", now=NOW)
+
+    for attempt in ("สวัสดี", "码", "café", "🙂"):
+        decision = auth.redeem(event(), attempt, now=NOW)
+        assert not decision, f"{attempt!r} should not authorize anybody"
+        assert "not valid" in decision.reason
+
+    # And a real code still works afterwards -- nothing was consumed.
+    live = auth.pending_codes()
+    assert len(tuple(live)) == 1
+    assert auth.redeem(event(), next(iter(live)).code, now=NOW)
+
+
 def test_open_configuration_is_reported() -> None:
     auth = Authorizer(platforms={"line": PlatformAuth(allow_all=True)}, global_allow_all=True)
     warnings = auth.warnings()

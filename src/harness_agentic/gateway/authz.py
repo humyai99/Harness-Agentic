@@ -177,7 +177,22 @@ class Authorizer:
         return AuthDecision(True, "paired", "pairing", is_admin=record.make_admin)
 
     def _match(self, candidate: str) -> PairingCode | None:
-        """Find a code without leaking which prefix was right."""
+        """Find a code without leaking which prefix was right.
+
+        Non-ASCII candidates are rejected before any comparison.
+        :func:`hmac.compare_digest` raises ``TypeError`` on a ``str`` holding
+        non-ASCII characters, and the candidate here is whatever an
+        unauthenticated stranger typed after ``/pair`` -- so ``/pair สวัสดี``
+        raised out of the router instead of being answered, which on a Thai
+        deployment is the ordinary case rather than an edge one. Codes are drawn
+        from :data:`CODE_ALPHABET`, so nothing outside ASCII can ever match and
+        refusing early loses nothing.
+
+        Still checked against every outstanding code, and without an early
+        return, so the time taken does not depend on which one matched.
+        """
+        if not candidate.isascii():
+            return None
         found: PairingCode | None = None
         for code, record in self._codes.items():
             if hmac.compare_digest(code, candidate):
