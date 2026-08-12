@@ -134,7 +134,11 @@ def validate(candidate: CandidateSkill) -> ValidationReport:
     findings.extend(secret_findings)
     severity = max(severity, secret_severity)
 
-    injection = _scan_injection(body)
+    # The whole document, not just the body. `description` is the one field that
+    # sits in the L0 catalog inside the *system prompt* of every future session,
+    # which makes it the most valuable place in the file to hide an instruction
+    # and was the one place not being scanned.
+    injection = _scan_injection(candidate.content)
     findings.extend(injection)
     if injection:
         severity = max(severity, Severity.DANGEROUS)
@@ -208,20 +212,26 @@ def _scan_secrets(candidate: CandidateSkill) -> tuple[list[Finding], Severity]:
     return findings, Severity.DANGEROUS if findings else Severity.INFO
 
 
-def _scan_injection(body: str) -> list[Finding]:
+def _scan_injection(document: str) -> list[Finding]:
     """Look for text aimed at the agent rather than the task.
 
     A skill is loaded into the conversation as reference material. Text telling
     the agent to skip approvals or ignore its guidance is not a skill doing its
     job, whoever wrote it -- and a self-written skill is a *persistent* place
     for that to live, unlike a single poisoned message.
+
+    The whole document is scanned, frontmatter included. ``description`` is the
+    field that goes into the L0 catalog, inside the system prompt, on every turn
+    of every future session whose task looks vaguely related -- so it is the
+    highest-value place in the file to hide an instruction, and scanning only the
+    body left it open.
     """
     findings = [
-        Finding("GRD200", "error", f"body contains an instruction aimed at the agent: {p.pattern}")
+        Finding("GRD200", "error", f"it contains an instruction aimed at the agent: {p.pattern}")
         for p in _INJECTION_PATTERNS
-        if p.search(body)
+        if p.search(document)
     ]
-    if re.search(r"<!--.*?(ignore|instruct|system|approve).*?-->", body, re.S | re.I):
+    if re.search(r"<!--.*?(ignore|instruct|system|approve).*?-->", document, re.S | re.I):
         findings.append(
             Finding("GRD201", "error", "an HTML comment contains instruction-like text")
         )
@@ -234,15 +244,41 @@ def _scan_scripts(candidate: CandidateSkill) -> tuple[list[Finding], Severity]:
     severity = Severity.INFO
 
     for path, content in candidate.files:
-        if path.endswith(".py"):
+        language = _language_of(path, content)
+        if language == "python":
             found, level = _scan_python(path, content)
-        elif path.endswith((".sh", ".bash", ".zsh")):
+        elif language == "shell":
             found, level = _scan_shell(path, content)
         else:
             continue
         findings.extend(found)
         severity = max(severity, level)
     return findings, severity
+
+
+def _language_of(path: str, content: str) -> str:
+    """What a bundled file is, by extension and then by shebang.
+
+    Dispatching on the extension alone meant ``scripts/deploy`` -- no suffix, a
+    ``#!/bin/sh`` line, and ``curl … | sh`` inside -- was scanned by neither pass
+    and validated completely clean. An executable does not need a suffix to run,
+    so it must not need one to be inspected.
+    """
+    if path.endswith(".py"):
+        return "python"
+    if path.endswith((".sh", ".bash", ".zsh", ".ksh")):
+        return "shell"
+    first = content.lstrip().split("\n", 1)[0] if content.strip() else ""
+    if not first.startswith("#!"):
+        return ""
+    if "python" in first:
+        return "python"
+    if any(shell in first for shell in ("sh", "bash", "zsh", "ksh", "dash")):
+        # Matched loosely and last: `#!/usr/bin/env bash` and `#!/bin/sh` are the
+        # same hazard, and a shebang nobody recognises is better scanned as a
+        # shell script than skipped.
+        return "shell"
+    return ""
 
 
 def _scan_python(path: str, content: str) -> tuple[list[Finding], Severity]:
