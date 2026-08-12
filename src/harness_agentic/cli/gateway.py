@@ -53,6 +53,8 @@ remote shell is exactly this default."""
 _ENV_KEYS = {
     "telegram": ("TELEGRAM_BOT_TOKEN",),
     "line": ("LINE_CHANNEL_SECRET", "LINE_CHANNEL_ACCESS_TOKEN"),
+    "slack": ("SLACK_SIGNING_SECRET", "SLACK_BOT_TOKEN"),
+    "discord": ("DISCORD_BOT_TOKEN",),
 }
 
 
@@ -104,7 +106,7 @@ def register(app: typer.Typer) -> None:
 
     @group.command("check")
     def check(
-        platforms: str = typer.Option("telegram,line", "--platforms", "-p"),
+        platforms: str = typer.Option("telegram,line,slack,discord", "--platforms", "-p"),
         allow_all: bool = typer.Option(False, "--allow-all"),
     ) -> None:
         """Report what would start, and what is more open than it looks."""
@@ -245,6 +247,23 @@ def _build_line(resolver: SecretResolver) -> PlatformAdapter:
     )
 
 
+def _build_slack(resolver: SecretResolver) -> PlatformAdapter:
+    """Construct the Slack adapter from environment credentials."""
+    from harness_agentic.gateway.platforms.slack import SlackAdapter
+
+    return SlackAdapter(
+        signing_secret=resolver.require("SLACK_SIGNING_SECRET"),
+        bot_token=resolver.require("SLACK_BOT_TOKEN"),
+    )
+
+
+def _build_discord(resolver: SecretResolver) -> PlatformAdapter:
+    """Construct the Discord adapter from environment credentials."""
+    from harness_agentic.gateway.platforms.discord import DiscordAdapter
+
+    return DiscordAdapter(resolver.require("DISCORD_BOT_TOKEN"))
+
+
 def _build_fake(_resolver: SecretResolver) -> PlatformAdapter:
     """Construct the in-memory adapter. For smoke-testing the wiring."""
     from harness_agentic.gateway.platforms.fake import FakeAdapter
@@ -255,6 +274,8 @@ def _build_fake(_resolver: SecretResolver) -> PlatformAdapter:
 _BUILDERS: dict[str, Callable[[SecretResolver], PlatformAdapter]] = {
     "telegram": _build_telegram,
     "line": _build_line,
+    "slack": _build_slack,
+    "discord": _build_discord,
     "fake": _build_fake,
 }
 """Adapters have different constructors because platforms need different

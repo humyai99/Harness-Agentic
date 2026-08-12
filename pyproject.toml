@@ -35,7 +35,7 @@ tokens = ["tiktoken>=0.8"]
 keyring = ["keyring>=25"]
 docker = ["docker>=7"]
 repl = ["prompt_toolkit>=3.0.48,<4"]
-gateway = ["uvicorn>=0.30,<1"]
+gateway = ["uvicorn>=0.30,<1", "websockets>=13,<16"]
 all = ["harness-agentic[tokens,keyring,docker,repl,gateway]"]
 
 [project.scripts]
@@ -133,6 +133,10 @@ ignore = [
 # machinery -- and its tests -- work in an install without a web server.
 "src/harness_agentic/gateway/webserver.py" = ["PLC0415"]
 "src/harness_agentic/gateway/service.py" = ["PLC0415"]
+# `websockets` is the [gateway] extra, and asyncio is imported inside the
+# real socket transport so the protocol state machine stays importable
+# wherever the extra is not installed.
+"src/harness_agentic/gateway/platforms/discord.py" = ["ARG002", "PLC0415"]
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"
@@ -162,7 +166,10 @@ plugins = ["pydantic.mypy"]
 files = ["src"]
 
 [[tool.mypy.overrides]]
-module = ["docker.*", "tiktoken.*", "keyring.*", "prompt_toolkit.*", "tomli_w.*", "uvicorn.*"]
+module = [
+  "docker.*", "tiktoken.*", "keyring.*", "prompt_toolkit.*", "tomli_w.*",
+  "uvicorn.*", "websockets.*",
+]
 ignore_missing_imports = true
 
 # -------------------------------------------------------------- pytest ------

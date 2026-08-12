@@ -19,6 +19,8 @@ KNOWN: dict[str, str] = {
     "fake": "harness_agentic.gateway.platforms.fake:FakeAdapter",
     "telegram": "harness_agentic.gateway.platforms.telegram:TelegramAdapter",
     "line": "harness_agentic.gateway.platforms.line:LineAdapter",
+    "slack": "harness_agentic.gateway.platforms.slack:SlackAdapter",
+    "discord": "harness_agentic.gateway.platforms.discord:DiscordAdapter",
 }
 """Platform name to ``module:attribute``. The single place a name resolves."""
 
