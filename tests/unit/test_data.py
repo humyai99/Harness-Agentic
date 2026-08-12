@@ -148,6 +148,54 @@ def test_results_are_capped_and_say_so(database: Path) -> None:
     assert "truncated" in rows.render()
 
 
+def test_renaming_a_credential_column_is_refused(database: Path) -> None:
+    """The bug: masking keys on the name a column comes back under.
+
+    An alias is exactly what controls that name, so ``SELECT password_hash AS
+    notes`` returned the hash in full while ``SELECT password_hash`` returned a
+    marker -- and the value then lives in a transcript that gets stored,
+    compacted and possibly distilled into a skill. The model can reach this
+    itself, and so can an instruction in a page it was asked to read.
+    """
+    source = SqliteSource(path=database)
+
+    with pytest.raises(NotReadOnly, match="may not be renamed"):
+        source.query("SELECT id, password_hash AS notes FROM users")
+    # Wrapping it in an expression is the same bypass.
+    with pytest.raises(NotReadOnly, match="may not be renamed"):
+        source.query("SELECT substr(api_key, 1, 8) AS prefix FROM users")
+    with pytest.raises(NotReadOnly, match="may not be renamed"):
+        source.query("SELECT group_concat(password_hash) AS blob FROM users")
+
+
+def test_renaming_to_another_sensitive_name_is_allowed_and_still_masked(
+    database: Path,
+) -> None:
+    # The alias decides the output name, so a sensitive alias is still caught by
+    # the ordinary masking. Refusing it would be a false positive.
+    rows = SqliteSource(path=database).query("SELECT id, password_hash AS user_password FROM users")
+    assert rows.masked == ("user_password",)
+    assert "verysecrethash" not in " ".join(cell for row in rows.rows for cell in row)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # A table alias renames a table, not a column; the values still arrive
+        # under their own names and are masked there.
+        "SELECT id AS n FROM auth_tokens AS t",
+        "SELECT t.id FROM audit_tokens AS t JOIN sessions AS s ON s.id = t.id",
+        "SELECT count(*) AS total FROM users",
+        "SELECT id, display_name AS label FROM users",
+        # Referring to a credential column without returning it is fine.
+        "SELECT id FROM users WHERE password_hash IS NOT NULL",
+    ],
+)
+def test_ordinary_aliases_are_not_refused(sql: str) -> None:
+    # A control that fires on legitimate queries is one somebody switches off.
+    assert assert_read_only(sql)
+
+
 def test_the_connection_itself_is_read_only(database: Path) -> None:
     # The second half of the enforcement: even if a statement slipped past the
     # gate, the connection refuses to write.

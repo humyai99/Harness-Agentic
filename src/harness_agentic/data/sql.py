@@ -76,6 +76,14 @@ MASK = "<redacted:{column}>"
 _COMMENTS = re.compile(r"--[^\n]*|/\*.*?\*/", re.DOTALL)
 _WORD = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
 
+_TOKEN = re.compile(r"[A-Za-z_][A-Za-z_0-9.$]*|,|\(|\)|\*")
+_RENAMES_A_TABLE = frozenset({"from", "join"})
+"""``FROM audit_tokens AS t`` renames a table, not a column, and its values still
+arrive under their own names."""
+_BEFORE_THE_SOURCE = 2
+"""``FROM``/``JOIN`` sits two tokens before the ``AS`` that renames a table:
+``from``, the table, then ``as``."""
+
 
 class NotReadOnly(ValueError):
     """A statement was refused before it reached a database."""
@@ -161,7 +169,74 @@ def assert_read_only(sql: str) -> str:
     if "pragma" in words and not _is_introspection_pragma(stripped):
         detail = "only introspection pragmas are allowed"
         raise NotReadOnly(detail)
+
+    if renamed := aliased_secret(stripped):
+        source, alias = renamed
+        detail = (
+            f"{source} may not be renamed to {alias}: masking works on the name a "
+            f"column comes back under, so an alias would return the value in full. "
+            f"Select it as {source} and it will come back masked."
+        )
+        raise NotReadOnly(detail)
     return stripped
+
+
+def aliased_secret(statement: str) -> tuple[str, str] | None:
+    """A sensitive column renamed to something innocuous, if the statement does that.
+
+    Masking keys on the name a column *comes back* under, and an alias is exactly
+    the thing that controls that name -- so ``SELECT password_hash AS notes``
+    returned the hash in full while ``SELECT password_hash`` returned a marker.
+    The values are what must never reach a transcript, so a rename has to be
+    refused rather than trusted.
+
+    Refused rather than masked-anyway: which output column a renamed expression
+    corresponds to is exactly what cannot be determined without parsing the
+    dialect, and a query answered with everything masked teaches the model that
+    the data is empty. Refusing says what to do instead.
+
+    Expression forms are covered by walking back from a closing parenthesis to
+    its match, so ``substr(password,1,3) AS notes`` is caught too. Unaliased
+    expressions need no special handling: the driver names those columns after
+    the expression text, so ``password`` appears in the name and the ordinary
+    masking already applies.
+    """
+    tokens = _TOKEN.findall(statement)
+    lowered = [word.lower() for word in tokens]
+    for index, word in enumerate(lowered):
+        if word != "as" or index == 0 or index + 1 >= len(tokens):
+            continue
+        alias = tokens[index + 1]
+        if is_sensitive(alias):
+            continue  # renamed to something the ordinary masking still catches
+        if index >= _BEFORE_THE_SOURCE and lowered[index - _BEFORE_THE_SOURCE] in _RENAMES_A_TABLE:
+            continue
+        for candidate in _renamed_tokens(tokens, index):
+            column = candidate.rsplit(".", 1)[-1]
+            if is_sensitive(column):
+                return column, alias
+    return None
+
+
+def _renamed_tokens(tokens: Sequence[str], index: int) -> list[str]:
+    """The tokens of the select item that the ``AS`` at ``index`` renames.
+
+    One identifier normally. For an expression the closing parenthesis is walked
+    back to its match so the arguments are examined, which is what makes
+    ``lower(substr(password,1,3)) AS notes`` visible rather than a bare ``)``.
+    """
+    end = index - 1
+    if tokens[end] != ")":
+        return [tokens[end]]
+    depth = 0
+    for back in range(end, -1, -1):
+        if tokens[back] == ")":
+            depth += 1
+        elif tokens[back] == "(":
+            depth -= 1
+            if depth == 0:
+                return list(tokens[back + 1 : end])
+    return list(tokens[:end])  # pragma: no cover - unbalanced parens
 
 
 def is_sensitive(column: str) -> bool:
