@@ -80,6 +80,21 @@ class SecretResolver:
                 return secret
         return None
 
+    def require(self, name: str) -> Secret:
+        """Resolve a credential, or fail saying which one is missing.
+
+        The message names the variable and where it is looked for -- never a
+        value, and never a partial value. "Set TELEGRAM_BOT_TOKEN" is the whole
+        of what the operator needs, and anything more is a leak in the one
+        message guaranteed to end up in a bug report.
+        """
+        secret = self.get(name)
+        if secret is None:
+            places = " or ".join(str(path) for path in self._files)
+            detail = f"{name} is not set; put it in the environment or in {places}"
+            raise CredentialError(detail)
+        return secret
+
     def first(self, names: tuple[str, ...]) -> Secret | None:
         """Resolve the first of several accepted names."""
         for name in names:

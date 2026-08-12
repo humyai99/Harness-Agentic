@@ -242,6 +242,29 @@ class RecordingSink:
         return "".join(e.text for e in self.events if isinstance(e, TextChunk))
 
 
+class SwitchableSink:
+    """A sink whose destination can be changed after everything is wired.
+
+    An agent is built once per conversation but its output goes somewhere
+    different each turn -- a new chat message, a new SSE response, a new voice
+    stream. Rebuilding the agent to re-point its sink would throw away the
+    session and the loaded skills, and reaching into the runner to swap a
+    private attribute is the kind of thing that works until someone renames it.
+    So the sink handed to the runner is stable and the destination behind it
+    moves.
+    """
+
+    __slots__ = ("target",)
+
+    def __init__(self, target: EventSink = null_sink) -> None:
+        """Start pointed at ``target``, discarding events by default."""
+        self.target = target
+
+    def __call__(self, event: AgentEvent) -> None:
+        """Forward to whatever the sink currently points at."""
+        self.target(event)
+
+
 class FanOutSink:
     """Delivers each event to several sinks.
 

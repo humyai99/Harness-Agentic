@@ -35,7 +35,7 @@ tokens = ["tiktoken>=0.8"]
 keyring = ["keyring>=25"]
 docker = ["docker>=7"]
 repl = ["prompt_toolkit>=3.0.48,<4"]
-gateway = ["aiohttp>=3.10,<4"]
+gateway = ["uvicorn>=0.30,<1"]
 all = ["harness-agentic[tokens,keyring,docker,repl,gateway]"]
 
 [project.scripts]
@@ -55,6 +55,7 @@ dev = [
   "pytest-cov>=5",
   "pytest-xdist>=3",
   "hypothesis>=6",
+  "pytest-asyncio>=0.24",
   "ruff>=0.8",
   "mypy>=1.13",
   "pre-commit>=4",
@@ -107,10 +108,25 @@ ignore = [
 # Typer's API *is* calls-in-defaults, and a CLI command legitimately takes many
 # flags. Fighting the framework here would make the commands harder to read.
 "src/harness_agentic/cli/**" = ["B008", "PLR0913", "PLR0917"]
+# Adapter builders import their platform module on demand, so `harn`
+# starts without pulling in every platform's dependencies.
+"src/harness_agentic/cli/gateway.py" = ["B008", "PLR0913", "PLR0917", "PLC0415"]
 # The single sanctioned place for subprocess: the local execution environment.
 # run_shell() is a deliberate, separately-audited capability -- tools that
 # expose it are classified destructive and go through the approval policy.
 "src/harness_agentic/envs/local.py" = ["S603", "S604", "S607"]
+# Optional adapter hooks. connect/disconnect/typing default to doing nothing
+# because most platforms need nothing, and edit() takes arguments it does not
+# use because its only job is to fail loudly for adapters that claim the
+# capability without implementing it.
+"src/harness_agentic/gateway/adapter.py" = ["ARG002", "B027"]
+# Adapters implement an interface; a platform with no typing indicator still
+# has to accept the target it will not use.
+"src/harness_agentic/gateway/platforms/*.py" = ["ARG002"]
+# uvicorn is the [gateway] extra, imported on demand so the webhook
+# machinery -- and its tests -- work in an install without a web server.
+"src/harness_agentic/gateway/webserver.py" = ["PLC0415"]
+"src/harness_agentic/gateway/service.py" = ["PLC0415"]
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"
@@ -140,13 +156,15 @@ plugins = ["pydantic.mypy"]
 files = ["src"]
 
 [[tool.mypy.overrides]]
-module = ["docker.*", "tiktoken.*", "keyring.*", "prompt_toolkit.*", "tomli_w.*"]
+module = ["docker.*", "tiktoken.*", "keyring.*", "prompt_toolkit.*", "tomli_w.*", "uvicorn.*"]
 ignore_missing_imports = true
 
 # -------------------------------------------------------------- pytest ------
 
 [tool.pytest.ini_options]
 addopts = "-m 'not integration' --strict-markers --strict-config -ra"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 filterwarnings = ["error"]
 markers = [

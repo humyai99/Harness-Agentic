@@ -16,6 +16,11 @@ import pytest
 
 from harness_agentic.constants import ENV_HOME, ENV_PREFIX, ENV_PROFILE
 
+_REFUSAL = (
+    "network access from a unit test -- use FakeTransport or httpx.MockTransport, "
+    "or mark the test with @pytest.mark.integration"
+)
+
 
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -27,15 +32,32 @@ def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     import httpx  # noqa: PLC0415  -- imported here so collection stays cheap
 
-    def _blocked(*_args: Any, **_kwargs: Any) -> Any:
-        msg = (
-            "network access from a unit test -- use FakeTransport, or mark the "
-            "test with @pytest.mark.integration"
-        )
-        raise RuntimeError(msg)
+    real_sync = httpx.Client.send
+    real_async = httpx.AsyncClient.send
 
-    monkeypatch.setattr(httpx.Client, "send", _blocked)
-    monkeypatch.setattr(httpx.AsyncClient, "send", _blocked)
+    def _mocked(client: Any) -> bool:
+        """Whether this client is wired to an in-memory transport.
+
+        A client built on ``httpx.MockTransport`` never opens a socket, so
+        letting it through keeps the guard's actual promise -- no real network
+        -- while allowing adapters to be tested against recorded wire traffic.
+        The alternative, overriding this fixture per test, switches the guard
+        off entirely for those tests, which is how a live call sneaks back in.
+        """
+        return isinstance(getattr(client, "_transport", None), httpx.MockTransport)
+
+    def _blocked_sync(self: Any, *args: Any, **kwargs: Any) -> Any:
+        if _mocked(self):
+            return real_sync(self, *args, **kwargs)
+        raise RuntimeError(_REFUSAL)
+
+    async def _blocked_async(self: Any, *args: Any, **kwargs: Any) -> Any:
+        if _mocked(self):
+            return await real_async(self, *args, **kwargs)
+        raise RuntimeError(_REFUSAL)
+
+    monkeypatch.setattr(httpx.Client, "send", _blocked_sync)
+    monkeypatch.setattr(httpx.AsyncClient, "send", _blocked_async)
 
 
 @pytest.fixture(autouse=True)
