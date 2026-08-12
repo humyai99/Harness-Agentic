@@ -340,6 +340,64 @@ def test_the_fake_driver_enforces_the_policy_too() -> None:
         fake.navigate("http://127.0.0.1:8080/admin")
 
 
+def test_a_redirect_to_an_internal_address_is_refused() -> None:
+    """The bug: only the URL the agent named was checked.
+
+    A browser follows redirects itself, so an innocuous page that 302s to
+    http://169.254.169.254/ was fetched and rendered with no second check -- and
+    the metadata service hands IAM credentials to anything that asks. The policy
+    has to be re-applied on every hop, which is the property this asserts of both
+    drivers.
+    """
+    fake = FakeDriver(policy=UrlPolicy(resolver=resolver))
+    fake.add("https://innocent.test/start", HOME_PAGE, redirect_to="http://169.254.169.254/")
+    fake.start()
+
+    with pytest.raises(UrlRefused, match="metadata"):
+        fake.navigate("https://innocent.test/start")
+
+
+def test_a_redirect_chain_is_bounded() -> None:
+    # Otherwise a page redirecting to itself is an infinite loop, not a refusal.
+    fake = FakeDriver(policy=UrlPolicy(resolver=resolver))
+    fake.add("https://example.test/loop", HOME_PAGE, redirect_to="https://example.test/loop")
+    fake.start()
+
+    with pytest.raises(BrowserError, match="too many redirects"):
+        fake.navigate("https://example.test/loop")
+
+
+def test_a_redirect_to_a_permitted_page_is_followed() -> None:
+    fake = FakeDriver(policy=UrlPolicy(resolver=resolver))
+    fake.add("https://example.test/old", LOGIN_PAGE, redirect_to="https://example.test/home")
+    fake.add("https://example.test/home", HOME_PAGE, title="Dashboard")
+    fake.start()
+
+    snapshot = fake.navigate("https://example.test/old")
+    assert snapshot.title == "Dashboard"
+    assert fake.current_url() == "https://example.test/home"
+
+
+def test_every_request_is_judged_not_just_the_navigation() -> None:
+    """Page script can reach an internal address without navigating at all.
+
+    ``fetch('http://169.254.169.254/')`` from a loaded page is the same request
+    as a navigation, so interception covers subresources too. This is the pure
+    decision the real driver's route handler calls; the Playwright glue around it
+    needs a browser.
+    """
+    from harness_agentic.browser.driver import request_allowed
+
+    policy = UrlPolicy(resolver=resolver)
+    assert request_allowed("https://example.test/app.js", policy)
+    assert not request_allowed("http://169.254.169.254/latest/meta-data/", policy)
+    assert not request_allowed("http://127.0.0.1:8080/admin", policy)
+    # The page's own bytes reach nothing, so refusing them would break
+    # navigation without denying any access.
+    assert request_allowed("about:blank", policy)
+    assert request_allowed("data:text/html,<p>hi</p>", policy)
+
+
 def test_the_driver_protocol_is_satisfied_by_the_fake() -> None:
     from harness_agentic.browser.driver import Driver
 

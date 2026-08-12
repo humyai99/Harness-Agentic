@@ -29,10 +29,30 @@ log = logging.getLogger(__name__)
 DEFAULT_TIMEOUT_MS = 15_000
 MAX_SCREENSHOT_BYTES = 2_000_000
 DEFAULT_VIEWPORT = (1280, 800)
+NON_NETWORK_SCHEMES = ("about:", "data:", "blob:")
+"""Schemes that reach nothing, so the URL policy has no opinion on them.
+``about:blank`` is the starting page and ``data:``/``blob:`` are the page's own
+bytes; refusing them would break navigation without denying any access."""
 
 
 class BrowserError(HarnessError):
     """The browser could not do what was asked."""
+
+
+def request_allowed(url: str, policy: UrlPolicy) -> bool:
+    """Whether the browser may issue a request for ``url``.
+
+    Split out from the Playwright glue so the decision is testable without a
+    browser. Every request the page makes goes through this, not just the one the
+    agent asked for -- see :meth:`PlaywrightDriver.start`.
+    """
+    if url.startswith(NON_NETWORK_SCHEMES):
+        return True
+    try:
+        policy.check(url)
+    except UrlRefused:
+        return False
+    return True
 
 
 class Driver(Protocol):
@@ -108,8 +128,27 @@ class PlaywrightDriver:
             viewport={"width": self.viewport[0], "height": self.viewport[1]},
             user_agent=self.user_agent or None,
         )
+        # Every request, not just the one the agent named. Checking only the URL
+        # passed to `navigate` left the policy trivially bypassable: `goto`
+        # follows redirects itself, so a page that 302s to
+        # http://169.254.169.254/ was fetched and rendered with no second check
+        # -- and page script can reach the same address by fetch() without any
+        # navigation at all. Subresources go through here too, since an <img> or
+        # an XHR at an internal address is the same request either way.
+        context.route("**/*", self._guard_request)
         self._page = context.new_page()
         self._page.set_default_timeout(self.timeout_ms)
+
+    def _guard_request(
+        self, route: Any, request: Any
+    ) -> None:  # pragma: no cover - needs a browser
+        """Allow or abort one request according to the URL policy."""
+        url = str(getattr(request, "url", ""))
+        if request_allowed(url, self.policy):
+            route.continue_()
+            return
+        log.warning("browser request to %s refused by the URL policy", url)
+        route.abort()
 
     def stop(self) -> None:  # pragma: no cover - needs a real browser
         """Close the browser and the driver process."""
@@ -127,9 +166,21 @@ class PlaywrightDriver:
         The same policy as ``web_fetch``, and for the same reason: a page can
         redirect somewhere internal, and a browser will follow it and render
         whatever it finds.
+
+        Checked twice, because one check cannot cover it. Before navigating, so an
+        obviously refused URL fails with a clear message; and again on where the
+        browser actually landed, because ``goto`` follows redirects on its own and
+        the address that matters is the final one. Request interception (see
+        :meth:`start`) is what stops the refused hop being fetched at all; this
+        second check is what makes the refusal legible instead of a generic
+        navigation error.
         """
         checked = self.policy.check(url)
-        self._require_page().goto(checked.url, wait_until="domcontentloaded")
+        page = self._require_page()
+        page.goto(checked.url, wait_until="domcontentloaded")
+        landed = str(page.url)
+        if landed != checked.url and not landed.startswith(NON_NETWORK_SCHEMES):
+            self.policy.check(landed)
         return self.snapshot()
 
     def snapshot(self) -> Snapshot:  # pragma: no cover - needs a real browser
@@ -212,9 +263,27 @@ class FakeDriver:
     _refs: RefTable = field(default_factory=RefTable)
     _snapshot: Snapshot | None = None
 
-    def add(self, url: str, tree: Mapping[str, Any], *, title: str = "") -> None:
-        """Register a page."""
-        self.pages[url] = {"tree": dict(tree), "title": title or url}
+    def add(
+        self,
+        url: str,
+        tree: Mapping[str, Any],
+        *,
+        title: str = "",
+        redirect_to: str = "",
+    ) -> None:
+        """Register a page, optionally one that redirects elsewhere.
+
+        Redirects are modelled because they are how the URL policy gets bypassed.
+        A fake that only ever loads the URL it was handed cannot express the
+        attack -- fetch an innocuous page, get sent to the metadata service --
+        which meant the one property worth asserting here had no way to be
+        asserted.
+        """
+        self.pages[url] = {
+            "tree": dict(tree),
+            "title": title or url,
+            "redirect_to": redirect_to,
+        }
 
     def start(self) -> None:
         """Mark the browser open."""
@@ -224,8 +293,13 @@ class FakeDriver:
         """Mark it closed."""
         self.started = False
 
-    def navigate(self, url: str) -> Snapshot:
-        """Check the policy, then load a registered page."""
+    def navigate(self, url: str, *, _hops: int = 0) -> Snapshot:
+        """Check the policy, then load a registered page, following redirects.
+
+        The policy is re-checked on every hop, which is the behaviour the real
+        driver has to match: checking only the URL the agent named leaves the
+        whole control bypassable by a 302.
+        """
         if not self.started:
             detail = "the browser is not running"
             raise BrowserError(detail)
@@ -238,6 +312,13 @@ class FakeDriver:
             raise BrowserError(detail)
         self.url = url
         self.visited.append(url)
+
+        target = str(page.get("redirect_to") or "")
+        if target:
+            if _hops >= self.policy.max_redirects:
+                detail = f"too many redirects, stopped at {url}"
+                raise BrowserError(detail)
+            return self.navigate(target, _hops=_hops + 1)
         return self._build(page)
 
     def snapshot(self) -> Snapshot:
