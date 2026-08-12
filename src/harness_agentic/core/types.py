@@ -158,6 +158,14 @@ class Usage:
     they are priced differently, and because a sudden collapse in
     ``cache_read_tokens`` is the signal that something started mutating the
     stable part of the prompt.
+
+    "Separately" is the contract, and it binds every transport: ``input_tokens``
+    is the input that was *not* served from cache. Anthropic reports it that way
+    already, while OpenAI-compatible endpoints and Gemini fold the cached tokens
+    into their prompt count, so those transports subtract. A transport that
+    passes the raw prompt count straight through makes ``total`` count a cached
+    prefix twice and the same conversation cost differently depending on who
+    answered it.
     """
 
     input_tokens: int = 0

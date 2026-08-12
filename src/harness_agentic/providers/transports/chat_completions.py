@@ -274,13 +274,26 @@ class ChatCompletionsTransport(ProviderTransport):
 
     @staticmethod
     def _usage(raw: object) -> Usage:
-        """Read token accounting, including the cached-prefix count when given."""
+        """Read token accounting, including the cached-prefix count when given.
+
+        ``prompt_tokens`` is the *whole* prompt here, cached portion included,
+        which is the opposite of Anthropic's convention -- there ``input_tokens``
+        excludes the cache counters. :class:`~harness_agentic.core.types.Usage`
+        tracks cache reads "separately from ordinary input", so the cached part is
+        subtracted out. Reporting it both ways meant ``Usage.total`` counted a
+        cached prefix twice: a 1000-token prompt with 800 cached and 50 out came
+        back as 1850 instead of 1050, and the same conversation costed differently
+        depending on which provider answered it.
+        """
         if not isinstance(raw, dict):
             return Usage()
         details = raw.get("prompt_tokens_details") or {}
         cached = int(details.get("cached_tokens", 0) or 0) if isinstance(details, dict) else 0
+        prompt = int(raw.get("prompt_tokens", 0) or 0)
         return Usage(
-            input_tokens=int(raw.get("prompt_tokens", 0) or 0),
+            # Clamped: an endpoint claiming to be OpenAI-compatible while
+            # reporting these the other way round should not produce a negative.
+            input_tokens=max(0, prompt - cached),
             output_tokens=int(raw.get("completion_tokens", 0) or 0),
             cache_read_tokens=cached,
         )

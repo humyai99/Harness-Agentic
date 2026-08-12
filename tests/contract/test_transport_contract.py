@@ -246,3 +246,65 @@ def test_features_are_declared(transport: ProviderTransport) -> None:
     """Capability flags are how the loop avoids branching on provider names."""
     assert type(transport).features
     assert TransportFeature.STREAMING in type(transport).features
+
+
+# The same real situation in each provider's own wire vocabulary: a 1000-token
+# prompt of which 800 was served from cache, and 50 tokens out.
+CACHED_USAGE: dict[str, dict[str, object]] = {
+    "anthropic": {"input_tokens": 200, "output_tokens": 50, "cache_read_input_tokens": 800},
+    "openai_chat": {
+        "prompt_tokens": 1000,
+        "completion_tokens": 50,
+        "prompt_tokens_details": {"cached_tokens": 800},
+    },
+    "ollama_chat": {
+        "prompt_tokens": 1000,
+        "completion_tokens": 50,
+        "prompt_tokens_details": {"cached_tokens": 800},
+    },
+    "gemini": {
+        "promptTokenCount": 1000,
+        "candidatesTokenCount": 50,
+        "cachedContentTokenCount": 800,
+    },
+}
+UNCACHED_PROMPT = 1000
+CACHED_PROMPT = 200
+CACHE_READ = 800
+BILLED_TOTAL = 1050
+
+
+@pytest.mark.parametrize("name", sorted(CACHED_USAGE))
+def test_cached_input_is_never_counted_twice(name: str) -> None:
+    """``input_tokens`` means the input that was *not* served from cache.
+
+    The bug this pins down: Anthropic reports it that way already, while
+    OpenAI-compatible endpoints and Gemini fold the cached tokens into their
+    prompt count. Passing that straight through made ``total`` count a cached
+    prefix twice -- 1850 rather than 1050 here -- so the same conversation cost
+    different amounts depending on which provider answered it, and the
+    "cache_read collapsed" signal was measured against a moving baseline.
+
+    In the contract suite rather than a per-transport test, because it binds
+    every transport added later.
+    """
+    usage = TRANSPORTS[name]()._usage(CACHED_USAGE[name])  # type: ignore[attr-defined]
+
+    assert usage.cache_read_tokens == CACHE_READ
+    assert usage.input_tokens == CACHED_PROMPT, "the cached part must not be in input_tokens"
+    assert usage.total == BILLED_TOTAL
+
+
+@pytest.mark.parametrize("name", sorted(CACHED_USAGE))
+def test_an_uncached_prompt_is_reported_whole(name: str) -> None:
+    # Subtracting must not touch the ordinary case.
+    raw = dict(CACHED_USAGE[name])
+    for key in ("prompt_tokens_details", "cache_read_input_tokens", "cachedContentTokenCount"):
+        raw.pop(key, None)
+    raw["input_tokens"] = UNCACHED_PROMPT  # anthropic reports the whole prompt here
+
+    usage = TRANSPORTS[name]()._usage(raw)  # type: ignore[attr-defined]
+
+    assert usage.cache_read_tokens == 0
+    assert usage.input_tokens == UNCACHED_PROMPT
+    assert usage.total == UNCACHED_PROMPT + 50

@@ -238,13 +238,25 @@ class GeminiTransport(ProviderTransport):
 
     @staticmethod
     def _usage(raw: object) -> Usage:
-        """Read token accounting."""
+        """Read token accounting.
+
+        ``promptTokenCount`` counts the whole prompt, including the cached part
+        reported in ``cachedContentTokenCount``, so the cached tokens are
+        subtracted out to match what
+        :class:`~harness_agentic.core.types.Usage` means by ``input_tokens`` --
+        the non-cached input. Leaving both in made ``total`` count a cached
+        prefix twice.
+        """
         if not isinstance(raw, dict):
             return Usage()
+        cached = int(raw.get("cachedContentTokenCount", 0) or 0)
+        prompt = int(raw.get("promptTokenCount", 0) or 0)
         return Usage(
-            input_tokens=int(raw.get("promptTokenCount", 0) or 0),
+            input_tokens=max(0, prompt - cached),
             output_tokens=int(raw.get("candidatesTokenCount", 0) or 0),
-            cache_read_tokens=int(raw.get("cachedContentTokenCount", 0) or 0),
+            cache_read_tokens=cached,
+            # Gemini counts thoughts inside candidatesTokenCount, so this is
+            # reported for visibility and deliberately not added to `total`.
             reasoning_tokens=int(raw.get("thoughtsTokenCount", 0) or 0),
         )
 
