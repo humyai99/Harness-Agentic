@@ -35,7 +35,7 @@ def install_builtins(target: ToolRegistry | None = None) -> ToolRegistry:
         Toolset(
             name="core",
             description="Always-on tools: searching the agent's own history.",
-            tools=("session_search",),
+            tools=("session_search", "delegate"),
         )
     )
     reg.define_toolset(

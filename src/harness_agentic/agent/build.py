@@ -13,6 +13,11 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePath
 from typing import TYPE_CHECKING
 
+from harness_agentic.agent.delegate import (
+    DelegationLimits,
+    Delegator,
+    install_delegate_tool,
+)
 from harness_agentic.agent.runner import AgentRunner, ModelChoice
 from harness_agentic.core.cancel import CancelToken
 from harness_agentic.core.clock import Clock, SystemClock
@@ -130,6 +135,7 @@ def build_agent(
     sql_source: SqlSource | None = None,
     retriever: Retriever | None = None,
     http_fetcher: Fetcher | None = None,
+    delegation: DelegationLimits | None = None,
     surface: str = "cli",
     emit: EventSink = null_sink,
     approval: ApprovalPolicy | None = None,
@@ -181,6 +187,36 @@ def build_agent(
         install_kb_tools(tool_registry, retriever)
     if http_fetcher is not None:
         install_http_tools(tool_registry, http_fetcher)
+
+    limits = delegation or DelegationLimits(allowed_toolsets=tuple(toolsets))
+    if limits.max_depth > 0:
+        # A child gets a fresh agent with the same wiring and one less level of
+        # depth. Building it lazily matters: an agent that never delegates must
+        # not pay for a second store and a second HTTP client.
+        def spawn(task: str, granted: Sequence[str], max_steps: int) -> AgentBundle:
+            del task  # the prompt is passed to run_turn, not to the constructor
+            return build_agent(
+                model=model,
+                workspace=workspace,
+                sessions_dir=sessions_dir,
+                toolsets=granted,
+                fetcher=fetcher,
+                search=search,
+                sql_source=sql_source,
+                retriever=retriever,
+                http_fetcher=http_fetcher,
+                delegation=limits.child(),
+                surface=surface,
+                emit=emit,
+                approval=approval,
+                clock=clock,
+                fallbacks=fallbacks,
+                transports=transports,
+                stream=stream,
+                max_iterations=max_steps,
+            )
+
+        install_delegate_tool(tool_registry, Delegator(factory=spawn, limits=limits))
 
     # `core` is always on: an agent that cannot reach its own history has to
     # guess at anything compaction summarized away.

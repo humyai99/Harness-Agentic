@@ -136,6 +136,9 @@ ignore = [
 # Small stdlib helpers imported at the point of use, so the module graph
 # stays shallow -- these are leaf utilities, not dependencies.
 "src/harness_agentic/net/*.py" = ["PLC0415"]
+# Plugin discovery imports importlib.metadata on demand: reading entry points
+# is slow and only matters when plugins are actually being loaded.
+"src/harness_agentic/plugins/loader.py" = ["PLC0415"]
 # `websockets` is the [gateway] extra, and asyncio is imported inside the
 # real socket transport so the protocol state machine stays importable
 # wherever the extra is not installed.
