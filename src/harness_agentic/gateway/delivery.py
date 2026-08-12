@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -43,6 +44,8 @@ from harness_agentic.gateway.types import DeliveryTarget, OutboundMessage, SentR
 if TYPE_CHECKING:
     from harness_agentic.gateway.adapter import PlatformAdapter
 
+log = logging.getLogger(__name__)
+
 FLUSH_AT_RATIO = 0.8
 """Flush a chunked buffer once it reaches this share of the size cap, so the
 split lands on a paragraph rather than exactly on the limit."""
@@ -55,6 +58,8 @@ class DeliveryStats:
 
     sends: int = 0
     edits: int = 0
+    failures: int = 0
+    """Platform calls that were rejected. The text they carried is retried."""
     edits_skipped: int = 0
     """Debounced away. High is good: it means coalescing worked."""
     chars: int = 0
@@ -153,13 +158,25 @@ class Delivery:
         self._pending = asyncio.create_task(self._edit_after_debounce())
 
     async def _edit_after_debounce(self) -> None:
-        """Wait out the platform's edit interval, then push the latest text."""
+        """Wait out the platform's edit interval, then push the latest text.
+
+        Failures are absorbed here rather than left to escape. This runs as a
+        fire-and-forget task, so an exception would surface only as asyncio's
+        "task exception was never retrieved" and the answer would go missing with
+        no other trace. Because ``_posted_text`` is now only advanced on success,
+        the next chunk's push retries the text that did not land.
+        """
         interval = self.adapter.capabilities.min_edit_interval_s
         elapsed = self.clock.monotonic() - self._last_edit_at
         if elapsed < interval:
             await self.clock.sleep(interval - elapsed)
-        with contextlib.suppress(asyncio.CancelledError):
+        try:
             await self._push_edit()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.stats.failures += 1
+            log.warning("%s rejected an edit (%s); will retry", self.adapter.platform, exc)
 
     async def _push_edit(self) -> None:
         """Post or rewrite the streaming message with everything so far."""
@@ -176,8 +193,11 @@ class Delivery:
                 self._buffer = "\n\n".join(rest)
                 self._posted, self._posted_text, self._edit_count = None, "", 0
                 return
-            self._posted_text = text
 
+        # Recorded only *after* the platform accepted it. Setting it first meant
+        # a rate-limited edit left `_posted_text` claiming text that never
+        # landed, and every later attempt then saw "nothing changed" and skipped
+        # it -- so the user got a silently truncated answer.
         if self._posted is None:
             self._posted = await self.adapter.send(self.target, OutboundMessage(text))
             self.stats.sends += 1
@@ -185,7 +205,8 @@ class Delivery:
             await self.adapter.edit(self._posted, OutboundMessage(text))
             self.stats.edits += 1
             self._edit_count += 1
-        self.stats.chars = len(self._posted_text)
+        self._posted_text = text
+        self.stats.chars = len(text)
         self._last_edit_at = self.clock.monotonic()
 
     async def _commit(self, text: str) -> None:
@@ -263,7 +284,13 @@ class Delivery:
             return
         if self.adapter.capabilities.edit_messages and leftover != posted:
             self._last_edit_at = -1e9  # the final write is never debounced away
-            await self._push_edit()
+            try:
+                await self._push_edit()
+            except Exception as exc:
+                # The turn is over, so there is no later push to retry on. Say so
+                # rather than ending silently with a half-delivered answer.
+                self.stats.failures += 1
+                log.warning("%s rejected the final edit: %s", self.adapter.platform, exc)
             return
         if not self.adapter.capabilities.edit_messages:
             await self._send_text(leftover)

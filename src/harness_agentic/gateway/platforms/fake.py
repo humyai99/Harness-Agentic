@@ -97,6 +97,9 @@ class FakeAdapter(QueueAdapter):
 
     async def edit(self, ref: SentRef, message: OutboundMessage) -> None:
         """Record an edit against a previously posted message."""
+        if self.fail_next_send is not None:
+            error, self.fail_next_send = self.fail_next_send, None
+            raise error
         for posted in self.posted:
             if posted.message_id == ref.message_id:
                 posted.edits.append(message.text)

@@ -240,3 +240,36 @@ async def test_the_manual_clock_advances_wall_time_too() -> None:
     before = clock.now()
     await clock.advance(60.0)
     assert (clock.now() - before).total_seconds() == pytest.approx(60.0)
+
+
+async def test_a_failed_edit_does_not_lose_the_text_forever() -> None:
+    """The bug: ``_posted_text`` was recorded before the send, not after.
+
+    A rate limit or a network blip on one edit then made every later attempt
+    see ``text == _posted_text`` and return early, so that stretch of the answer
+    was never delivered -- silently, and the user just sees a truncated reply.
+    """
+    adapter = FakeAdapter(capabilities=telegram_like())
+    clock = ManualAsyncClock()
+    delivery = make(adapter, clock)
+
+    await delivery.handle(TextChunk("the first half of the answer "))
+    await clock.advance(2.0)
+    assert adapter.posted, "the first push should have landed"
+
+    # The platform rate-limits the next edit. The failure is absorbed -- this
+    # runs as a fire-and-forget task, so an escaping exception would show up only
+    # as asyncio's "never retrieved" warning.
+    adapter.fail_next_send = RuntimeError("429 Too Many Requests")
+    await delivery.handle(TextChunk("and the second half."))
+    await clock.advance(2.0)
+    assert delivery.stats.failures == 1
+
+    # More text arrives and the turn ends. The whole answer must still be there.
+    await delivery.handle(TextChunk(" Done."))
+    await delivery.finish()
+
+    final = adapter.posted[-1].final_text
+    assert "the first half" in final
+    assert "the second half." in final
+    assert "Done." in final
