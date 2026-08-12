@@ -368,10 +368,17 @@ class AgentRunner:
                 iterations += 1
                 api_retries = 0
                 total = total + response.usage
-                if self._budget is not None and response.usage.input_tokens:
+                if self._budget is not None and response.usage.prompt_tokens:
                     # Every real response teaches the estimator something, and
                     # the error is systematic enough to be worth learning.
-                    self._budget.observe(response.usage.input_tokens)
+                    #
+                    # The *whole* prompt, cached portion included. The estimator
+                    # counts every token it is about to send and cannot know which
+                    # part the provider will serve from cache, so calibrating
+                    # against `input_tokens` made a working cache look like a
+                    # shrinking prompt -- and the better the cache worked, the
+                    # more the budget under-counted.
+                    self._budget.observe(response.usage.prompt_tokens)
                 self._emit(UsageReported(usage=response.usage, cumulative=total))
 
                 self._store.append(session.id, [response.message], usage=response.usage)

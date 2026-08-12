@@ -185,14 +185,24 @@ class Usage:
         )
 
     @property
+    def prompt_tokens(self) -> int:
+        """Every input token the request carried, cached or not.
+
+        The number to compare an *estimate* against, because an estimator counts
+        the whole prompt and has no idea which part of it the provider happened
+        to serve from cache. Calibrating against ``input_tokens`` instead makes
+        prompt caching look like a shrinking prompt: with 90% of a 100k prompt
+        cached, the correction factor collapses to its floor, a real 150k prompt
+        is estimated at 75k, compaction never fires, and the request overflows
+        for real -- after which the overflow bump and the next observation fight
+        each other instead of converging.
+        """
+        return self.input_tokens + self.cache_read_tokens + self.cache_write_tokens
+
+    @property
     def total(self) -> int:
         """Every token the provider billed for."""
-        return (
-            self.input_tokens
-            + self.output_tokens
-            + self.cache_read_tokens
-            + self.cache_write_tokens
-        )
+        return self.prompt_tokens + self.output_tokens
 
 
 # ------------------------------------------------------------- response -----

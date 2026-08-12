@@ -24,6 +24,7 @@ from harness_agentic.core.types import (
     ToolResultBlock,
     ToolSchema,
     ToolUseBlock,
+    Usage,
 )
 from harness_agentic.errors import ContextExhausted
 from harness_agentic.memory.budget import (
@@ -224,6 +225,54 @@ def test_the_correction_is_bounded() -> None:
     for _ in range(50):
         budget.shrink_from_error()
     assert budget.correction <= 3.0
+
+
+def test_a_working_cache_does_not_look_like_a_shrinking_prompt() -> None:
+    """The bug: calibration was fed ``input_tokens``, which excludes the cache.
+
+    An estimator counts every token it is about to send and cannot know which
+    part the provider will serve from cache. Measuring against the non-cached
+    remainder made the correction factor collapse to its floor -- and the better
+    caching worked, the worse the under-count. A real 150k prompt then estimated
+    at 75k, compaction never fired, and the request overflowed for real; after
+    which the overflow bump and the next observation fought each other instead of
+    converging.
+
+    Every design decision in this codebase about preserving the cached prefix
+    makes this *more* likely, not less.
+    """
+    # 100k prompt, 90k of it a cached prefix. The estimate was accurate.
+    cached = Usage(input_tokens=10_000, output_tokens=500, cache_read_tokens=90_000)
+    assert cached.prompt_tokens == 100_000, "the whole prompt, cached part included"
+
+    budget = TokenBudget(window=200_000)
+    for _ in range(9):
+        budget.observe(cached.prompt_tokens, raw=100_000)
+
+    assert budget.correction == pytest.approx(1.0, abs=0.01), (
+        "an accurate estimate must not be corrected"
+    )
+    real = 150_000
+    assert budget.over_threshold(int(real * budget.correction)), (
+        "a prompt past the threshold has to trigger compaction"
+    )
+
+
+def test_the_old_calibration_would_have_missed_it() -> None:
+    # Pins the failure itself, so the two readings cannot quietly swap back.
+    cached = Usage(input_tokens=10_000, output_tokens=500, cache_read_tokens=90_000)
+    naive = TokenBudget(window=200_000)
+    for _ in range(9):
+        naive.observe(cached.input_tokens, raw=100_000)
+
+    assert naive.correction < 1.0
+    assert not naive.over_threshold(int(150_000 * naive.correction))
+
+
+def test_total_is_the_prompt_plus_the_output() -> None:
+    usage = Usage(input_tokens=10, output_tokens=5, cache_read_tokens=100, cache_write_tokens=20)
+    assert usage.prompt_tokens == 130
+    assert usage.total == 135
 
 
 def test_retargeting_resets_what_was_learned() -> None:
