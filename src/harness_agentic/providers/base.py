@@ -194,8 +194,6 @@ class ProviderTransport(ABC):
         self.close()
 
 
-def supports_all(
-    transport: type[ProviderTransport], required: Sequence[TransportFeature]
-) -> bool:
+def supports_all(transport: type[ProviderTransport], required: Sequence[TransportFeature]) -> bool:
     """Whether ``transport`` advertises every feature in ``required``."""
     return all(feature in transport.features for feature in required)

@@ -115,9 +115,7 @@ class ExecEnvironment(ABC):
     # -- filesystem ---------------------------------------------------------
 
     @abstractmethod
-    def read_bytes(
-        self, path: PurePath, *, max_bytes: int = DEFAULT_MAX_READ_BYTES
-    ) -> bytes:
+    def read_bytes(self, path: PurePath, *, max_bytes: int = DEFAULT_MAX_READ_BYTES) -> bytes:
         """Read a file, refusing anything larger than ``max_bytes``."""
 
     @abstractmethod

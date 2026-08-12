@@ -51,9 +51,7 @@ class AsyncBridge:
                 ready.set()
                 loop.run_forever()
 
-            thread = threading.Thread(
-                target=_run, name="harness-async-bridge", daemon=True
-            )
+            thread = threading.Thread(target=_run, name="harness-async-bridge", daemon=True)
             thread.start()
             ready.wait()
             self._loop = loop_box[0]

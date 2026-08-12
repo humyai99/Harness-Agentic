@@ -106,9 +106,7 @@ class ToolResultBlock:
     kind: Literal["tool_result"] = "tool_result"
 
 
-ContentBlock: TypeAlias = (
-    TextBlock | ThinkingBlock | ImageBlock | ToolUseBlock | ToolResultBlock
-)
+ContentBlock: TypeAlias = TextBlock | ThinkingBlock | ImageBlock | ToolUseBlock | ToolResultBlock
 
 
 # -------------------------------------------------------------- message -----

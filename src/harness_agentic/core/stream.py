@@ -189,9 +189,7 @@ class StreamAccumulator:
 
         blocks = list(self._blocks)
         if interrupted:
-            blocks = [
-                b for b in blocks if not (isinstance(b, ThinkingBlock) and not b.replayable)
-            ]
+            blocks = [b for b in blocks if not (isinstance(b, ThinkingBlock) and not b.replayable)]
 
         for index in self._tool_order:
             partial = self._tools[index]
@@ -219,9 +217,7 @@ class StreamAccumulator:
     @property
     def visible_text(self) -> str:
         """Text emitted so far, for rendering a partial response."""
-        return "".join(
-            [*(b.text for b in self._blocks if isinstance(b, TextBlock)), *self._text]
-        )
+        return "".join([*(b.text for b in self._blocks if isinstance(b, TextBlock)), *self._text])
 
 
 def _parse_arguments(raw: str) -> dict[str, object]:

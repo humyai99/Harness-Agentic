@@ -36,10 +36,7 @@ class ToolRegistry:
     def register(self, tool: Tool, *, override: bool = False) -> None:
         """Add a tool, refusing to shadow an existing name unless told to."""
         if tool.name in self._tools and not override:
-            msg = (
-                f"tool {tool.name!r} is already registered by "
-                f"{self._tools[tool.name].source!r}"
-            )
+            msg = f"tool {tool.name!r} is already registered by {self._tools[tool.name].source!r}"
             raise ValueError(msg)
         self._tools[tool.name] = tool
         self._toolsets.setdefault(

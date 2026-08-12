@@ -215,9 +215,7 @@ class LocalEnvironment(ExecEnvironment):
 
     # -- filesystem ---------------------------------------------------------
 
-    def read_bytes(
-        self, path: PurePath, *, max_bytes: int = DEFAULT_MAX_READ_BYTES
-    ) -> bytes:
+    def read_bytes(self, path: PurePath, *, max_bytes: int = DEFAULT_MAX_READ_BYTES) -> bytes:
         """Read a file, refusing anything over ``max_bytes``."""
         target = self._resolve(path)
         size = target.stat().st_size
