@@ -62,3 +62,35 @@ def test_importing_the_package_stays_cheap(banned: str) -> None:
     """
     code = f"import harness_agentic, sys; sys.exit(1 if {banned!r} in sys.modules else 0)"
     assert subprocess.run([sys.executable, "-c", code], check=False).returncode == 0
+
+
+def test_builtin_registry_actually_contains_the_builtins() -> None:
+    """The bug this guards: ``install_builtins(ToolRegistry())`` returns nothing.
+
+    The tools register into the process-wide registry at import time and that
+    call only adds the *toolsets*, so passing a fresh registry produces something
+    that looks right and offers no tools -- which is how three CLI commands came
+    to build empty registries.
+    """
+    from harness_agentic.tools.builtin import builtin_registry, install_builtins
+    from harness_agentic.tools.registry import ToolRegistry
+
+    populated = builtin_registry()
+    assert "read_file" in populated.all()
+    assert "file" in populated.toolsets()
+
+    # The misuse, demonstrated so nobody reintroduces it.
+    assert not install_builtins(ToolRegistry()).all()
+
+
+def test_every_builtin_is_offered_on_every_surface_by_default() -> None:
+    """A surface's restrictions belong to the surface, not to each tool.
+
+    Missing this made the web UI and the voice surface offer zero tools.
+    """
+    from harness_agentic.tools.builtin import builtin_registry
+
+    registry = builtin_registry()
+    for surface in ("cli", "gateway", "cron", "web", "voice"):
+        offered = registry.resolve(enabled_toolsets=["core", "file"], surface=surface)
+        assert offered, f"no tools reachable on the {surface} surface"

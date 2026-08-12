@@ -15,7 +15,14 @@ from typing import TYPE_CHECKING, TypeVar
 from pydantic import BaseModel
 
 from harness_agentic.errors import ToolNotFound
-from harness_agentic.tools.spec import Danger, Tool, ToolContext, ToolResult, Toolset
+from harness_agentic.tools.spec import (
+    DEFAULT_SURFACES,
+    Danger,
+    Tool,
+    ToolContext,
+    ToolResult,
+    Toolset,
+)
 
 if TYPE_CHECKING:
     from harness_agentic.core.types import ToolSchema
@@ -58,7 +65,7 @@ class ToolRegistry:
         available_when: Callable[[], bool] | None = None,
         max_result_chars: int = 40_000,
         timeout_s: float = 120.0,
-        surfaces: Sequence[str] = ("cli", "gateway", "cron"),
+        surfaces: Sequence[str] = tuple(DEFAULT_SURFACES),
         source: str = "builtin",
         override: bool = False,
     ) -> Callable[[Callable[[P, ToolContext], ToolResult]], Callable[[P, ToolContext], ToolResult]]:

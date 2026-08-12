@@ -45,7 +45,7 @@ from harness_agentic.providers.credentials import SecretResolver
 from harness_agentic.providers.resolver import TransportResolver
 from harness_agentic.session.sqlite_store import SqliteSessionStore
 from harness_agentic.tools.approval import ApprovalPolicy
-from harness_agentic.tools.builtin import install_builtins
+from harness_agentic.tools.builtin import builtin_registry
 from harness_agentic.tools.builtin.browser import install_browser_tools
 from harness_agentic.tools.builtin.data import (
     install_http_tools,
@@ -55,7 +55,7 @@ from harness_agentic.tools.builtin.data import (
 from harness_agentic.tools.builtin.session import install_session_tools
 from harness_agentic.tools.builtin.web import install_web_tools
 from harness_agentic.tools.dispatch import ToolExecutor
-from harness_agentic.tools.registry import ToolRegistry, registry
+from harness_agentic.tools.registry import ToolRegistry
 
 if TYPE_CHECKING:
     from harness_agentic.browser.driver import Driver
@@ -67,6 +67,7 @@ if TYPE_CHECKING:
     from harness_agentic.net.search import SearchProvider
     from harness_agentic.providers.base import ProviderTransport
     from harness_agentic.session.store import SessionStore
+    from harness_agentic.tools.registry import ToolRegistry
     from harness_agentic.tools.spec import ApprovalRequest
 
 
@@ -177,7 +178,7 @@ def build_agent(
     # Forked, not the process-wide registry: the session store and the HTTP
     # fetcher installed below are this agent's, and a second agent in the same
     # process must not inherit them.
-    tool_registry = install_builtins(registry).fork()
+    tool_registry = builtin_registry()
     store = SqliteSessionStore(sessions_dir / "state.db")
     # Needs a live store, so it is registered here rather than at import time.
     install_session_tools(tool_registry, store)

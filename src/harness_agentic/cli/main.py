@@ -13,6 +13,7 @@ from harness_agentic.cli import chat as chat_commands
 from harness_agentic.cli import extend as extend_commands
 from harness_agentic.cli import gateway as gateway_commands
 from harness_agentic.cli import inspect as inspect_commands
+from harness_agentic.cli import surfaces as surface_commands
 from harness_agentic.cli.render import console
 from harness_agentic.version import __version__
 
@@ -49,6 +50,7 @@ inspect_commands.register(app)
 inspect_commands.register_doctor(app)
 gateway_commands.register(app)
 extend_commands.register(app)
+surface_commands.register(app)
 
 
 def main() -> None:

@@ -118,6 +118,7 @@ ignore = [
 # Adapter builders import their platform module on demand, so `harn`
 # starts without pulling in every platform's dependencies.
 "src/harness_agentic/cli/gateway.py" = ["B008", "PLR0913", "PLR0917", "PLC0415"]
+"src/harness_agentic/cli/surfaces.py" = ["B008", "PLR0913", "PLR0917", "PLC0415"]
 # The single sanctioned place for subprocess: the local execution environment.
 # run_shell() is a deliberate, separately-audited capability -- tools that
 # expose it are classified destructive and go through the approval policy.

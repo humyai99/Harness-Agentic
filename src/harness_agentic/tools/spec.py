@@ -116,6 +116,16 @@ class _Handler(Protocol):
     def __call__(self, params: Any, ctx: ToolContext) -> ToolResult: ...
 
 
+DEFAULT_SURFACES = frozenset({"cli", "gateway", "cron", "web", "voice"})
+"""Where a tool is offered unless it says otherwise.
+
+Every surface, because a surface's restrictions belong to the surface: the
+gateway gates by toolset, voice withholds tools whose output has no spoken form,
+and cron denies approval. A tool opting *out* here is for the rare case where a
+tool genuinely cannot work somewhere -- not for expressing policy, which would
+put the policy in as many places as there are tools."""
+
+
 @dataclass(frozen=True, slots=True)
 class Tool:
     """A registered, callable tool."""
@@ -133,7 +143,7 @@ class Tool:
     available_when: Callable[[], bool] | None = None
     max_result_chars: int = 40_000
     timeout_s: float = 120.0
-    surfaces: frozenset[str] = frozenset({"cli", "gateway", "cron"})
+    surfaces: frozenset[str] = DEFAULT_SURFACES
     source: str = "builtin"
     raw_schema: Mapping[str, Any] | None = None
     """A JSON Schema supplied directly, used when ``params_model`` is ``None``."""

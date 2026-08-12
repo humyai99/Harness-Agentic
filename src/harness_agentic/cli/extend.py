@@ -30,8 +30,7 @@ from harness_agentic.cron.schedule import BadSchedule, parse
 from harness_agentic.mcp.bridge import McpBridge
 from harness_agentic.mcp.stdio import ServerConfig, load_servers
 from harness_agentic.plugins.loader import discover, load
-from harness_agentic.tools.builtin import install_builtins
-from harness_agentic.tools.registry import ToolRegistry
+from harness_agentic.tools.builtin import builtin_registry
 
 JOBS_FILENAME = "cron.toml"
 
@@ -80,7 +79,7 @@ def _register_plugins(app: typer.Typer) -> None:
         A throwaway registry on purpose: this is a diagnostic, and a diagnostic
         that mutates the thing it is diagnosing is a diagnostic nobody trusts.
         """
-        registry = install_builtins(ToolRegistry())
+        registry = builtin_registry()
         found = discover(home=harness_home() / "plugins", project=project / ".harness" / "plugins")
         result = load(
             registry,
@@ -256,7 +255,7 @@ def register_mcp(app: typer.Typer) -> None:
         if not servers:
             console.print("No MCP servers configured.")
             return
-        registry = install_builtins(ToolRegistry())
+        registry = builtin_registry()
         bridge = McpBridge(registry=registry)
         try:
             bridge.connect_all(servers)

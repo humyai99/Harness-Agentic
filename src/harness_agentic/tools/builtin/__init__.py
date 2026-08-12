@@ -12,7 +12,19 @@ from harness_agentic.tools.builtin import fs, session, shell
 from harness_agentic.tools.registry import ToolRegistry, registry
 from harness_agentic.tools.spec import Toolset
 
-__all__ = ["fs", "install_builtins", "session", "shell"]
+__all__ = ["builtin_registry", "fs", "install_builtins", "session", "shell"]
+
+
+def builtin_registry() -> ToolRegistry:
+    """A private registry holding every builtin tool and toolset.
+
+    The one correct way to get a registry with the builtins in it.
+    ``install_builtins(ToolRegistry())`` looks like it should work and returns
+    something empty, because the tools register into the process-wide registry at
+    import time and only the *toolsets* are added by that call. Forking after is
+    what makes both halves present.
+    """
+    return install_builtins(registry).fork()
 
 
 def install_builtins(target: ToolRegistry | None = None) -> ToolRegistry:
