@@ -133,6 +133,9 @@ ignore = [
 # machinery -- and its tests -- work in an install without a web server.
 "src/harness_agentic/gateway/webserver.py" = ["PLC0415"]
 "src/harness_agentic/gateway/service.py" = ["PLC0415"]
+# Small stdlib helpers imported at the point of use, so the module graph
+# stays shallow -- these are leaf utilities, not dependencies.
+"src/harness_agentic/net/*.py" = ["PLC0415"]
 # `websockets` is the [gateway] extra, and asyncio is imported inside the
 # real socket transport so the protocol state machine stays importable
 # wherever the extra is not installed.

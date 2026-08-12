@@ -25,6 +25,8 @@ from harness_agentic.memory.compactor import (
     ContextCompactor,
     transcript_for_summary,
 )
+from harness_agentic.net.fetch import HttpFetcher
+from harness_agentic.net.search import from_environment
 from harness_agentic.prompts.builder import (
     PromptBuilder,
     identity_fragment,
@@ -33,16 +35,20 @@ from harness_agentic.prompts.builder import (
     workspace_fragment,
 )
 from harness_agentic.providers.base import CompletionRequest
+from harness_agentic.providers.credentials import SecretResolver
 from harness_agentic.providers.resolver import TransportResolver
 from harness_agentic.session.sqlite_store import SqliteSessionStore
 from harness_agentic.tools.approval import ApprovalPolicy
 from harness_agentic.tools.builtin import install_builtins
 from harness_agentic.tools.builtin.session import install_session_tools
+from harness_agentic.tools.builtin.web import install_web_tools
 from harness_agentic.tools.dispatch import ToolExecutor
 from harness_agentic.tools.registry import ToolRegistry, registry
 
 if TYPE_CHECKING:
     from harness_agentic.envs.base import ExecEnvironment
+    from harness_agentic.net.fetch import Fetcher
+    from harness_agentic.net.search import SearchProvider
     from harness_agentic.providers.base import ProviderTransport
     from harness_agentic.session.store import SessionStore
     from harness_agentic.tools.spec import ApprovalRequest
@@ -101,6 +107,9 @@ class AgentBundle:
     registry: ToolRegistry
     context: RunContext
     prompts: PromptBuilder
+    executor: ToolExecutor
+    """Exposed so a surface can read what ran, and whether anything it ran
+    brought untrusted content into the conversation."""
 
 
 def build_agent(
@@ -109,6 +118,8 @@ def build_agent(
     workspace: Path,
     sessions_dir: Path,
     toolsets: Sequence[str] = ("file", "terminal"),
+    fetcher: Fetcher | None = None,
+    search: SearchProvider | None = None,
     surface: str = "cli",
     emit: EventSink = null_sink,
     approval: ApprovalPolicy | None = None,
@@ -130,10 +141,23 @@ def build_agent(
         for r in resolver.chain(model, fallbacks)
     ]
 
-    tool_registry = install_builtins(registry)
+    # Forked, not the process-wide registry: the session store and the HTTP
+    # fetcher installed below are this agent's, and a second agent in the same
+    # process must not inherit them.
+    tool_registry = install_builtins(registry).fork()
     store = SqliteSessionStore(sessions_dir / "state.db")
     # Needs a live store, so it is registered here rather than at import time.
     install_session_tools(tool_registry, store)
+    if "web" in toolsets:
+        # Only built when asked for. Opening an HTTP client and resolving a
+        # search key for an agent that will never fetch anything is waste, and
+        # the URL policy is deployment configuration a caller may want to
+        # narrow -- so a caller may pass its own fetcher instead.
+        install_web_tools(
+            tool_registry,
+            fetcher or HttpFetcher(),
+            search=search or from_environment(SecretResolver(), fetcher or HttpFetcher()),
+        )
 
     # `core` is always on: an agent that cannot reach its own history has to
     # guess at anything compaction summarized away.
@@ -206,5 +230,10 @@ def build_agent(
     # The session the caller will run against; surfaces read it off the store.
     context.session_id = session.id
     return AgentBundle(
-        runner=runner, store=store, registry=tool_registry, context=context, prompts=prompts
+        runner=runner,
+        store=store,
+        registry=tool_registry,
+        context=context,
+        prompts=prompts,
+        executor=executor,
     )

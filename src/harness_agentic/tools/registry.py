@@ -60,6 +60,7 @@ class ToolRegistry:
         timeout_s: float = 120.0,
         surfaces: Sequence[str] = ("cli", "gateway", "cron"),
         source: str = "builtin",
+        override: bool = False,
     ) -> Callable[[Callable[[P, ToolContext], ToolResult]], Callable[[P, ToolContext], ToolResult]]:
         """Register the decorated function as a tool.
 
@@ -67,6 +68,11 @@ class ToolRegistry:
         the description from the docstring, so a tool definition stays one
         function rather than a function plus a schema plus a registration call
         that can fall out of step with each other.
+
+        ``override`` is for tools closed over a live dependency -- a store, an
+        HTTP client -- which are installed once per agent rather than once per
+        process. The gateway builds an agent per conversation, so refusing the
+        second registration would take the second conversation with it.
         """
 
         def decorate(
@@ -91,7 +97,8 @@ class ToolRegistry:
                     timeout_s=timeout_s,
                     surfaces=frozenset(surfaces),
                     source=source,
-                )
+                ),
+                override=override,
             )
             return fn
 
@@ -162,6 +169,20 @@ class ToolRegistry:
             if group := self._toolsets.get(current):
                 stack.extend(group.includes)
         return seen
+
+    def fork(self) -> ToolRegistry:
+        """A copy that shares nothing mutable with this one.
+
+        Import-time registration lands in one process-wide registry, which is
+        fine for tools that are the same everywhere. Tools closed over a live
+        dependency are not: two conversations in one gateway can be configured
+        differently, and the second must not inherit whichever fetcher or store
+        the first happened to be built with. So every agent gets a fork.
+        """
+        copy = ToolRegistry()
+        copy._tools = dict(self._tools)
+        copy._toolsets = dict(self._toolsets)
+        return copy
 
     # -- testing ------------------------------------------------------------
 

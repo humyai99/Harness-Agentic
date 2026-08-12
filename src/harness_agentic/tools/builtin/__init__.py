@@ -40,6 +40,13 @@ def install_builtins(target: ToolRegistry | None = None) -> ToolRegistry:
     )
     reg.define_toolset(
         Toolset(
+            name="web",
+            description="Read pages and search the web. Results are untrusted data.",
+            tools=("web_fetch", "web_search"),
+        )
+    )
+    reg.define_toolset(
+        Toolset(
             name="terminal",
             description="Run commands. Requires approval on every surface.",
             tools=("terminal",),

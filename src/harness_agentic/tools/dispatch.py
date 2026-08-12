@@ -66,6 +66,10 @@ class ToolExecutor:
         self._emit = emit
         self._max_parallel = max(1, max_parallel)
         self.records: list[ToolCallRecord] = []
+        self.tainted = False
+        """Whether any call so far returned content from outside the trust
+        boundary. Read at the end of a run, not per call: taint is a property of
+        the session, because that is the scope a distilled skill draws from."""
 
     # -- single call --------------------------------------------------------
 
@@ -142,6 +146,11 @@ class ToolExecutor:
                 hint = f" The arguments were not valid JSON: {call.raw_arguments[:200]!r}."
             return ToolResult.error(f"Invalid arguments for {tool.name}: {problems}.{hint}")
 
+    def _note_taint(self, result: ToolResult) -> None:
+        """Remember that untrusted content entered the conversation."""
+        if result.tainted:
+            self.tainted = True
+
     def _bound(self, result: ToolResult, tool: Tool) -> ToolResult:
         """Cap result size so one call cannot swallow the context window.
 
@@ -160,6 +169,7 @@ class ToolExecutor:
             images=result.images,
             truncated=True,
             data=result.data,
+            tainted=result.tainted,
         )
 
     def _finish(
@@ -172,6 +182,7 @@ class ToolExecutor:
     ) -> ToolResultBlock:
         """Record, emit, and convert a result into a wire block."""
         duration = time.monotonic() - started
+        self._note_taint(result)
         self.records.append(
             ToolCallRecord(
                 call_id=call.id,

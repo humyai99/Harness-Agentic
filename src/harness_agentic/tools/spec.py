@@ -55,6 +55,15 @@ class ToolResult:
     truncated: bool = False
     data: Mapping[str, object] | None = None
     """Structured detail for hooks and traces. Never sent to the model."""
+    tainted: bool = False
+    """This result carried content from outside the trust boundary.
+
+    Set by anything that reads the network or a third-party file. It propagates
+    to the session, and a tainted session's skill proposals require human
+    review whatever the autonomy setting says -- because a poisoned memory
+    ruins one session and a poisoned skill ruins every future one whose
+    description matches. See :mod:`harness_agentic.skills.reflection`.
+    """
 
     @classmethod
     def error(cls, message: str) -> ToolResult:
