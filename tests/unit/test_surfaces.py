@@ -8,13 +8,16 @@ that keeps talking over somebody who interrupted it.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 import time
+from urllib.parse import quote
 
 import pytest
 
-from harness_agentic.api.events import Frame, Stream, sink_for, to_frame
-from harness_agentic.api.server import Api, ApiError, Approvals, new_token
+from harness_agentic.api.events import Fanout, Frame, Stream, sink_for, to_frame
+from harness_agentic.api.server import Api, ApiError, Approvals, AsgiApp, new_token
 from harness_agentic.core.cancel import CancelToken
 from harness_agentic.core.events import (
     ApprovalRequested,
@@ -127,6 +130,105 @@ def test_the_sink_fills_a_stream() -> None:
     assert len(stream.drain()) == 1
 
 
+# -- fanning one session out to several connections ----------------------------------
+
+
+def test_every_subscriber_gets_every_frame() -> None:
+    """The bug: one shared stream per session, and ``drain()`` empties it.
+
+    Two consumers -- two tabs, or the moment during SSE's own reconnect when the
+    old connection and the new are both alive -- each took whatever happened to be
+    buffered. The answer arrived split between them, with a gap the reader can see
+    and nothing in the log.
+    """
+    fanout = Fanout()
+    first, second = fanout.subscribe(), fanout.subscribe()
+    fanout.push(Frame("text", {"text": "the whole answer"}))
+
+    assert "the whole answer" in "".join(first.drain())
+    assert "the whole answer" in "".join(second.drain())
+
+
+def test_frames_pushed_before_anyone_subscribes_reach_the_first_subscriber() -> None:
+    # POST /turns returns immediately and the page subscribes afterwards, so the
+    # opening of an answer is pushed with nobody attached.
+    fanout = Fanout()
+    fanout.push(Frame("text", {"text": "opening words"}))
+
+    assert "opening words" in "".join(fanout.subscribe().drain())
+    # And only the first subscriber gets the backlog; a later tab joins live.
+    assert fanout.subscribe().drain() == []
+
+
+def test_unsubscribing_detaches_exactly_that_subscriber() -> None:
+    # Two streams holding the same frames are value-equal unless Stream compares
+    # by identity, and `list.remove` would then detach the wrong one.
+    fanout = Fanout()
+    first, second = fanout.subscribe(), fanout.subscribe()
+    fanout.unsubscribe(first)
+
+    assert fanout.subscriber_count() == 1
+    fanout.push(Frame("text", {"text": "still listening"}))
+    assert first.closed
+    assert "still listening" in "".join(second.drain())
+
+
+def test_a_disconnected_subscriber_stops_being_filled() -> None:
+    # Otherwise every reconnect leaves a buffer behind that nobody reads.
+    fanout = Fanout()
+    stream = fanout.subscribe()
+    fanout.unsubscribe(stream)
+    fanout.push(Frame("text", {"text": "gone"}))
+
+    assert stream.drain() == []
+    assert fanout.subscriber_count() == 0
+
+
+# -- the ASGI layer ------------------------------------------------------------------
+
+
+async def test_a_disconnected_stream_detaches_its_subscriber() -> None:
+    """Driven through ASGI, because that is the layer that decides this.
+
+    A closed tab used to be noticed only when the next ``send`` happened to
+    raise -- up to a heartbeat away on an idle session -- and until then its
+    stream stayed attached and kept being filled.
+    """
+    surface = api()
+    inbound: list[dict[str, object]] = [
+        {"type": "http.request", "body": b"", "more_body": False},
+        {"type": "http.disconnect"},
+    ]
+
+    async def receive() -> dict[str, object]:
+        return inbound.pop(0) if inbound else {"type": "http.disconnect"}
+
+    sent: list[dict[str, object]] = []
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    # A frame produced before anyone was listening, as a real turn does.
+    surface.sink("s1")(TextChunk("hello from the agent"))
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/api/sessions/s1/events",
+        "query_string": f"token={TOKEN}".encode(),
+        "headers": [],
+    }
+    await asyncio.wait_for(AsgiApp(surface)(scope, receive, send), timeout=5)
+
+    body = b"".join(bytes(message.get("body", b"")) for message in sent)  # type: ignore[arg-type]
+    headers = dict(sent[0]["headers"])  # type: ignore[call-overload]
+    assert headers[b"content-type"] == b"text/event-stream"
+    assert headers[b"x-accel-buffering"] == b"no", "nginx buffers SSE into oblivion without it"
+    assert b"hello from the agent" in body
+    assert b"retry:" in body, "the reconnect interval is sent once per stream"
+    assert surface.streams["s1"].subscriber_count() == 0, "the subscriber should be detached"
+
+
 # -- the API -----------------------------------------------------------------------
 
 
@@ -204,13 +306,57 @@ def test_a_failing_turn_reports_onto_the_stream_rather_than_vanishing() -> None:
     surface.dispatch("POST", "/api/sessions/s1/turns", auth(), b'{"prompt": "hi"}')
     assert surface.wait_for_turns(timeout=5)
 
-    drained = "".join(surface.streams["s1"].drain())
+    drained = "".join(surface.streams["s1"].subscribe().drain())
     assert "unreachable" in drained
     assert "notice" in drained
 
 
 def test_an_unknown_endpoint_is_a_404() -> None:
     assert api().dispatch("GET", "/api/nothing", auth(), b"").status == 404
+
+
+def test_an_escaped_query_token_still_authorizes() -> None:
+    """The bug: the query token was compared without percent-decoding.
+
+    The page sends it through ``encodeURIComponent``, so an operator-supplied
+    ``HARNESS_WEB_TOKEN`` holding any base64 secret arrives escaped. The result
+    was a bare 401 -- correct for an attacker, undebuggable for the person
+    holding the right token.
+    """
+    secret = "a+b/c=d"  # what a base64 secret looks like
+    surface = Api(token=secret, run_turn=lambda session, prompt: None)
+    escaped = quote(secret, safe="")
+
+    assert (
+        surface.dispatch("GET", f"/api/sessions/s1/events?token={escaped}", {}, b"").status == 200
+    )
+    # And a wrong token is still refused, escaped or not.
+    assert surface.dispatch("GET", "/api/sessions/s1/events?token=a%2Bb", {}, b"").status == 401
+
+
+def test_waiting_for_turns_bounds_the_total_wait_not_each_thread() -> None:
+    """The bug: the timeout was handed to every ``join`` in turn.
+
+    So it was a per-thread budget, and a shutdown asked to wait half a second
+    with several turns in flight waited several times that.
+    """
+    release = threading.Event()
+
+    def blocked(session: str, prompt: str) -> None:
+        release.wait(timeout=10)
+
+    surface = Api(token=TOKEN, run_turn=blocked)
+    for index in range(4):
+        surface.dispatch("POST", f"/api/sessions/s{index}/turns", auth(), b'{"prompt": "hi"}')
+
+    began = time.monotonic()
+    finished = surface.wait_for_turns(timeout=0.3)
+    elapsed = time.monotonic() - began
+    release.set()
+
+    assert not finished, "the turns are still blocked, so this should report a timeout"
+    assert elapsed < 1.0, f"waited {elapsed:.2f}s for a 0.3s timeout across 4 turns"
+    surface.wait_for_turns(timeout=5)
 
 
 def test_tokens_are_long_enough_to_be_worth_having() -> None:
@@ -253,7 +399,7 @@ def test_a_web_approval_releases_the_waiting_tool() -> None:
     assert response.status == 200
     assert granted == [True]
     # And the stream shows both halves, so a second tab sees what happened.
-    drained = "".join(surface.streams["s1"].drain())
+    drained = "".join(surface.streams["s1"].subscribe().drain())
     assert "approval_requested" in drained
     assert "approval_resolved" in drained
 

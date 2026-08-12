@@ -24,17 +24,21 @@ would inevitably drift into being the weaker one.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hmac
 import json
 import logging
 import secrets
 import threading
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+from urllib.parse import unquote
 
 from harness_agentic.api.events import (
     HEARTBEAT_COMMENT,
+    Fanout,
     Frame,
     Stream,
     preamble,
@@ -50,6 +54,10 @@ log = logging.getLogger(__name__)
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8788
 MAX_BODY_BYTES = 200_000
+STREAM_POLL_S = 0.1
+HEARTBEAT_AFTER_S = 15.0
+"""Well inside every proxy's idle timeout. A stream that dies mid-turn looks to
+the reader like the agent crashed."""
 APPROVAL_TIMEOUT_S = 300.0
 """How long a tool waits for a browser to answer. Past this it is refused --
 denying is the safe outcome, and a turn blocked forever is worse than a turn
@@ -69,6 +77,10 @@ class Response:
     content_type: str = "application/json"
     stream: Stream | None = None
     """Set for the SSE endpoint, which the ASGI layer serves incrementally."""
+    detach: Callable[[], None] | None = None
+    """Run when a streamed response ends, however it ends. This is how a
+    subscriber is removed from its :class:`~harness_agentic.api.events.Fanout`;
+    without it a disconnected tab keeps receiving copies of every frame."""
 
     @classmethod
     def json(cls, payload: object, *, status: int = 200) -> Response:
@@ -161,7 +173,8 @@ class Api:
     token: str
     run_turn: TurnRunner
     approvals: Approvals = field(default_factory=Approvals)
-    streams: dict[str, Stream] = field(default_factory=dict)
+    streams: dict[str, Fanout] = field(default_factory=dict)
+    """One fan-out per session, each holding a stream per live connection."""
     sessions: Callable[[], list[dict[str, object]]] | None = None
     include_thinking: bool = False
     index_html: str = ""
@@ -237,7 +250,9 @@ class Api:
         if not prompt:
             return Response.error("prompt is required")
 
-        stream = self.streams.setdefault(session, Stream())
+        # Created before the thread starts, so frames emitted in the first
+        # milliseconds of the turn land in the backlog rather than nowhere.
+        self._fanout(session)
         # On a thread, and answered before the turn finishes: a turn takes
         # minutes and an HTTP request that waits for it times out in every proxy
         # between here and the browser.
@@ -252,7 +267,6 @@ class Api:
         # than dropping a half-finished answer on the floor.
         self._turns = [live for live in self._turns if live.is_alive()]
         self._turns.append(thread)
-        del stream
         return Response.json({"accepted": True, "session": session}, status=202)
 
     def _run_guarded(self, session: str, prompt: str) -> None:
@@ -261,16 +275,21 @@ class Api:
             self.run_turn(session, prompt)
         except Exception as exc:
             log.exception("web turn failed for %s", session)
-            stream = self.streams.get(session)
-            if stream is not None:
-                stream.push(Frame("notice", {"level": "error", "message": str(exc)}))
+            self._fanout(session).push(Frame("notice", {"level": "error", "message": str(exc)}))
 
     def _subscribe(self, session: str) -> Response:
-        """Hand back the stream for a session, creating it if needed."""
+        """Attach one new subscriber to a session's fan-out.
+
+        A stream per connection, not per session. Sharing one queue meant SSE's
+        own reconnect split an answer between the old connection and the new.
+        """
+        fanout = self._fanout(session)
+        stream = fanout.subscribe()
         return Response(
             status=200,
             content_type="text/event-stream",
-            stream=self.streams.setdefault(session, Stream()),
+            stream=stream,
+            detach=lambda: fanout.unsubscribe(stream),
         )
 
     def _resolve_approval(self, identifier: str, body: bytes) -> Response:
@@ -292,16 +311,26 @@ class Api:
 
         Returns whether they all finished. Used by shutdown, and by tests that
         need to observe what a turn put on the stream.
+
+        The timeout bounds the *total* wait. Passing it to each ``join`` in turn
+        made it a per-thread budget, so a shutdown asked to wait 30 seconds could
+        take thirty times that with thirty turns in flight.
         """
-        deadline = timeout
+        deadline = time.monotonic() + timeout
         for thread in list(self._turns):
-            thread.join(timeout=deadline)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            thread.join(timeout=remaining)
         return not any(thread.is_alive() for thread in self._turns)
 
+    def _fanout(self, session: str) -> Fanout:
+        """One session's fan-out, created on first use."""
+        return self.streams.setdefault(session, Fanout())
+
     def sink(self, session: str) -> Any:
-        """The event sink for one session's stream."""
-        stream = self.streams.setdefault(session, Stream())
-        return sink_for(stream, include_thinking=self.include_thinking)
+        """The event sink for one session, feeding every subscriber."""
+        return sink_for(self._fanout(session), include_thinking=self.include_thinking)
 
     def prompter(self, session: str) -> Callable[[ApprovalRequest], bool]:
         """A prompter that asks the browser and blocks until it answers.
@@ -313,7 +342,7 @@ class Api:
 
         def ask(request: ApprovalRequest) -> bool:
             identifier, waiting = self.approvals.open(request)
-            stream = self.streams.setdefault(session, Stream())
+            stream = self._fanout(session)
             stream.push(
                 Frame(
                     "approval_requested",
@@ -357,12 +386,21 @@ def _query_token(path: str) -> str:
     Only for ``EventSource``, which cannot set headers. It is a real cost --
     query strings end up in access logs -- so it is the one concession, and the
     token is single-purpose and revocable.
+
+    Percent-decoded, because the page sends it through ``encodeURIComponent``.
+    A token of our own minting is URL-safe and survives either way, but an
+    operator-supplied ``HARNESS_WEB_TOKEN`` containing ``+``, ``/`` or ``=`` --
+    any base64 secret -- arrives escaped. Comparing the escaped form gave a bare
+    401 with no explanation, which is correct for an attacker and impossible to
+    debug for the person holding the right token.
     """
     _, _, query = path.partition("?")
     for part in query.split("&"):
         key, _, value = part.partition("=")
         if key == "token":
-            return value
+            # unquote, not unquote_plus: encodeURIComponent escapes "+" as %2B,
+            # so a literal "+" here is part of the token, not a space.
+            return unquote(value)
     return ""
 
 
@@ -487,12 +525,26 @@ class AsgiApp:
 
         response = self.api.dispatch(scope.get("method", "GET"), path, headers, body)
         if response.stream is not None:
-            await self._serve_stream(response.stream, send)
+            try:
+                await self._serve_stream(response.stream, receive, send)
+            finally:
+                # However this ends -- disconnect, cancellation, a send that
+                # raised -- the subscriber comes off the fan-out. Skipping this
+                # on the error paths is how a reconnecting browser leaves a
+                # buffer behind on every attempt.
+                if response.detach is not None:
+                    response.detach()
             return
         await _send_simple(send, response.status, response.body, response.content_type)
 
-    async def _serve_stream(self, stream: Stream, send: Any) -> None:
-        """Hold the connection open, flushing frames and heartbeats."""
+    async def _serve_stream(self, stream: Stream, receive: Any, send: Any) -> None:
+        """Hold the connection open, flushing frames and heartbeats.
+
+        Watches for ``http.disconnect`` alongside the frames. Without it a closed
+        tab is noticed only when the next ``send`` happens to raise, which for an
+        idle session is up to a heartbeat away -- and until then its stream is
+        still attached and still being filled.
+        """
         await send(
             {
                 "type": "http.response.start",
@@ -508,18 +560,20 @@ class AsgiApp:
             }
         )
         await send({"type": "http.response.body", "body": preamble().encode(), "more_body": True})
-        idle = 0.0
-        while not stream.closed:
-            chunk = "".join(stream.drain())
-            if chunk:
-                idle = 0.0
-                await send(
-                    {"type": "http.response.body", "body": chunk.encode(), "more_body": True}
-                )
-            else:
-                await asyncio.sleep(0.1)
-                idle += 0.1
-                if idle >= 15.0:  # noqa: PLR2004 - well inside every proxy's idle timeout
+        gone = asyncio.ensure_future(_until_disconnect(receive))
+        try:
+            idle = 0.0
+            while not stream.closed and not gone.done():
+                chunk = "".join(stream.drain())
+                if chunk:
+                    idle = 0.0
+                    await send(
+                        {"type": "http.response.body", "body": chunk.encode(), "more_body": True}
+                    )
+                    continue
+                await asyncio.sleep(STREAM_POLL_S)
+                idle += STREAM_POLL_S
+                if idle >= HEARTBEAT_AFTER_S:
                     idle = 0.0
                     await send(
                         {
@@ -528,7 +582,14 @@ class AsgiApp:
                             "more_body": True,
                         }
                     )
-        await send({"type": "http.response.body", "body": b"", "more_body": False})
+            if not gone.done():
+                await send({"type": "http.response.body", "body": b"", "more_body": False})
+        finally:
+            gone.cancel()
+            # Awaited, not just cancelled: a pending task left behind at teardown
+            # is a warning the suite treats as an error, and rightly.
+            with contextlib.suppress(asyncio.CancelledError):
+                await gone
 
     async def _read(self, receive: Any) -> bytes | None:
         """Read the body, or ``None`` if it is over the cap."""
@@ -555,6 +616,14 @@ class AsgiApp:
             elif message["type"] == "lifespan.shutdown":
                 await send({"type": "lifespan.shutdown.complete"})
                 return
+
+
+async def _until_disconnect(receive: Any) -> None:
+    """Return once the client has gone away."""
+    while True:
+        message = await receive()
+        if message["type"] == "http.disconnect":
+            return
 
 
 async def _send_simple(send: Any, status: int, body: bytes, content_type: str) -> None:
