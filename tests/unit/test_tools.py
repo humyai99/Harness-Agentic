@@ -8,13 +8,14 @@ each becomes an error result the model can read and react to.
 from __future__ import annotations
 
 import stat
+import threading
 from pathlib import Path, PurePath
 
 import pytest
 from pydantic import BaseModel, Field
 
 from harness_agentic.core.cancel import CancelToken
-from harness_agentic.core.types import ToolUseBlock
+from harness_agentic.core.types import ToolResultBlock, ToolUseBlock
 from harness_agentic.envs.local import LocalEnvironment
 from harness_agentic.errors import PathOutsideWorkspace
 from harness_agentic.tools.approval import (
@@ -393,6 +394,67 @@ def test_batch_preserves_call_order(builtins: ToolRegistry, ctx: _Ctx, tmp_path:
     ]
     results = executor.execute_batch(calls, ctx)  # type: ignore[arg-type]
     assert [r.tool_use_id for r in results] == ["c0", "c1", "c2"]
+
+
+def test_a_read_before_a_write_sees_the_file_before_the_write(
+    builtins: ToolRegistry, ctx: _Ctx, tmp_path: Path
+) -> None:
+    """Read-then-edit is the most common thing an agent does in one turn.
+
+    Safe calls used to be hoisted to the end of the batch so they could run
+    concurrently, which put every write ahead of every read regardless of the
+    order asked for. The read then returned the rewritten file as its answer to
+    "read this file" -- and the model has no way to tell, so it reasons about a
+    before-state it never saw.
+    """
+    target = tmp_path / "config.py"
+    target.write_text("VERSION = 'original'\n", encoding="utf-8")
+    executor = ToolExecutor(builtins, approval=always_allow())
+
+    results = executor.execute_batch(
+        [
+            ToolUseBlock(id="c0", name="read_file", arguments={"path": "config.py"}),
+            ToolUseBlock(
+                id="c1",
+                name="write_file",
+                arguments={"path": "config.py", "content": "VERSION = 'rewritten'\n"},
+            ),
+        ],
+        ctx,  # type: ignore[arg-type]
+    )
+
+    assert "original" in results[0].text
+    assert "rewritten" not in results[0].text
+    assert [record.tool for record in executor.records] == ["read_file", "write_file"]
+    assert target.read_text(encoding="utf-8") == "VERSION = 'rewritten'\n"
+
+
+def test_consecutive_reads_still_share_one_batch(
+    builtins: ToolRegistry, ctx: _Ctx, tmp_path: Path
+) -> None:
+    # Ordering is restored by making a write a barrier, not by giving up
+    # concurrency: a run of reads is still one parallel batch.
+    for name in ("a.txt", "b.txt", "c.txt"):
+        (tmp_path / name).write_text(name, encoding="utf-8")
+    executor = ToolExecutor(builtins, approval=always_allow(), max_parallel=3)
+    threads: set[str] = set()
+
+    original = executor.execute
+
+    def watched(call: ToolUseBlock, context: ToolContext) -> ToolResultBlock:
+        threads.add(threading.current_thread().name)
+        return original(call, context)
+
+    executor.execute = watched  # type: ignore[method-assign]
+    executor.execute_batch(
+        [
+            ToolUseBlock(id=f"c{i}", name="read_file", arguments={"path": name})
+            for i, name in enumerate(("a.txt", "b.txt", "c.txt"))
+        ],
+        ctx,  # type: ignore[arg-type]
+    )
+
+    assert len(threads) > 1, "three reads in a row ran one after another"
 
 
 # -- builtin file tools --------------------------------------------------------

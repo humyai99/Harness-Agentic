@@ -214,12 +214,15 @@ class ToolExecutor:
     def execute_batch(
         self, calls: Sequence[ToolUseBlock], ctx: ToolContext
     ) -> list[ToolResultBlock]:
-        """Run several calls, returning results in the original order.
+        """Run several calls in the order they were asked for, batching reads.
 
-        Read-only and network calls run concurrently on a thread pool -- they
-        are blocking I/O, which is what threads are for. Anything that writes
-        runs serially in the order the model asked for, because two writes to
-        the same file racing is not a performance win.
+        Read-only and network calls run concurrently -- they are blocking I/O,
+        which is what threads are for -- but only in runs, and a call that
+        writes is a barrier. Hoisting every safe call to the end instead would
+        reorder the batch: ``[read_file(x), write_file(x)]`` ran the write
+        first, and the read then returned the rewritten file as its answer to
+        "read x". Read-then-edit is the most common thing an agent does, and
+        the model has no way to tell it happened.
         """
         if not calls:
             return []
@@ -227,21 +230,33 @@ class ToolExecutor:
             return [self.execute(calls[0], ctx)]
 
         results: list[ToolResultBlock | None] = [None] * len(calls)
-        parallel: list[int] = []
+        batch: list[int] = []
+
+        def run_batch() -> None:
+            """Run the pending run of safe calls, then clear it."""
+            if not batch:
+                return
+            if len(batch) == 1:
+                results[batch[0]] = self.execute(calls[batch[0]], ctx)
+            else:
+                workers = min(self._max_parallel, len(batch))
+                with ThreadPoolExecutor(
+                    max_workers=workers, thread_name_prefix="harness-tool"
+                ) as pool:
+                    futures = {pool.submit(self.execute, calls[i], ctx): i for i in batch}
+                    for future, index in futures.items():
+                        results[index] = future.result()
+            batch.clear()
 
         for index, call in enumerate(calls):
             tool = self._registry.maybe_get(call.name)
             if tool is not None and tool.danger <= Danger.NETWORK:
-                parallel.append(index)
-            else:
-                results[index] = self.execute(call, ctx)
-
-        if parallel:
-            workers = min(self._max_parallel, len(parallel))
-            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="harness-tool") as pool:
-                futures = {pool.submit(self.execute, calls[i], ctx): i for i in parallel}
-                for future, index in futures.items():
-                    results[index] = future.result()
+                batch.append(index)
+                continue
+            # Everything asked for earlier finishes before anything mutates.
+            run_batch()
+            results[index] = self.execute(call, ctx)
+        run_batch()
 
         return [r for r in results if r is not None]
 
