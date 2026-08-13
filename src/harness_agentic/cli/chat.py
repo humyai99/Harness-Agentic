@@ -41,7 +41,22 @@ DOUBLE_INTERRUPT_WINDOW_S = 1.5
 
 
 def _prompter(request: ApprovalRequest) -> bool:
-    """Ask the operator to approve one call."""
+    """Ask the operator to approve one call, if there is one to ask.
+
+    Without a terminal there is nobody to answer, and asking anyway is worse
+    than useless: ``typer.confirm`` blocks on stdin, so ``harn run`` in a
+    pipeline or a CI step -- the use its own docstring recommends -- hangs until
+    something kills it. Refusing immediately turns that into a tool error the
+    loop reports and the model can respond to, which is what a refusal is
+    supposed to be.
+    """
+    if not sys.stdin.isatty():
+        console.print(
+            f"[yellow]{request.tool}[/] needs approval and there is no terminal to ask. "
+            f"Pass --yes in a sandbox, or add a pattern to tools.approval.allowlist.",
+            markup=True,
+        )
+        return False
     console.print(f"\n[yellow]{request.tool}[/] wants to run:", markup=True)
     console.print(f"  {request.summary}", highlight=False)
     return typer.confirm("allow?", default=False)

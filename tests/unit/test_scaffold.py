@@ -94,3 +94,27 @@ def test_every_builtin_is_offered_on_every_surface_by_default() -> None:
     for surface in ("cli", "gateway", "cron", "web", "voice"):
         offered = registry.resolve(enabled_toolsets=["core", "file"], surface=surface)
         assert offered, f"no tools reachable on the {surface} surface"
+
+
+def test_harn_sessions_reads_the_store_the_agent_writes(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """It read a JsonlSessionStore; every agent has written SQLite for milestones.
+
+    So the one command whose whole job is listing sessions found none -- and
+    said so in exactly the words it uses when there genuinely are none, which is
+    why it could look like working software. Written against the real store
+    rather than a mock, because a mock of the wrong store is what the bug was.
+    """
+    from harness_agentic.constants import profile_dir
+    from harness_agentic.session.sqlite_store import SqliteSessionStore
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    store = SqliteSessionStore(profile_dir() / "sessions" / "state.db")
+    record = store.create(source="cli", cwd=workspace, model="fake/scripted")
+
+    result = CliRunner().invoke(app, ["sessions", "--workspace", str(workspace)])
+
+    assert result.exit_code == 0
+    assert record.id in result.stdout

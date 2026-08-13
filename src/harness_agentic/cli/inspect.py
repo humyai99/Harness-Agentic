@@ -18,7 +18,8 @@ from harness_agentic.constants import active_profile, harness_home, profile_dir
 from harness_agentic.errors import CredentialError, HarnessError
 from harness_agentic.providers.catalog import PROVIDERS, known_models, model_info
 from harness_agentic.providers.credentials import SecretResolver, resolve_credentials
-from harness_agentic.session.store import JsonlSessionStore, workspace_key_for
+from harness_agentic.session.sqlite_store import SqliteSessionStore
+from harness_agentic.session.store import workspace_key_for
 from harness_agentic.tools.builtin import install_builtins
 from harness_agentic.tools.registry import registry
 from harness_agentic.version import __version__
@@ -82,10 +83,17 @@ def register(app: typer.Typer) -> None:
         console.print(f"[dim]{len(resolved)} tool(s) on the {surface} surface[/]")
 
     @app.command()
-    def sessions(limit: int = typer.Option(20, "--limit", "-n")) -> None:
+    def sessions(
+        limit: int = typer.Option(20, "--limit", "-n"),
+        workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w"),
+    ) -> None:
         """List recent sessions in this workspace."""
-        store = JsonlSessionStore(profile_dir() / "sessions")
-        key = workspace_key_for(Path.cwd())
+        # The same store the agent writes to. This read a JsonlSessionStore
+        # while every agent has written SQLite since the FTS5 work, so the one
+        # command whose whole job is listing sessions found none -- and said so
+        # in the words it uses when there genuinely are none.
+        store = SqliteSessionStore(profile_dir() / "sessions" / "state.db")
+        key = workspace_key_for(workspace.resolve())
         records = store.recent(limit=limit, workspace_key=key)
         if not records:
             console.print("[dim]no sessions for this workspace yet[/]")

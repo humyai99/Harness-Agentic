@@ -29,10 +29,12 @@ from rich.table import Table
 
 from harness_agentic.agent.build import default_library
 from harness_agentic.cli.render import console
+from harness_agentic.config import load_settings
 from harness_agentic.constants import harness_home
 from harness_agentic.skills.model import Lifecycle
 from harness_agentic.skills.proposals import Autonomy, ProposalStore, Quotas
 from harness_agentic.skills.testing import SkillTestRunner, keyword_router
+from harness_agentic.tools.builtin import builtin_registry
 
 if TYPE_CHECKING:
     from harness_agentic.skills.registry import SkillRegistry
@@ -80,7 +82,7 @@ def register(app: typer.Typer) -> None:
                 meta.description.split("\n")[0][:60],
             )
         console.print(table)
-        catalog = library.catalog(())
+        catalog = library.catalog(_active_tools(workspace))
         console.print(
             f"[dim]{len(skills)} skill(s); the catalog costs about "
             f"{catalog.tokens:,} tokens per session[/]"
@@ -214,6 +216,19 @@ def register(app: typer.Typer) -> None:
             console.print(f"[red]no proposal {proposal_id!r}[/]")
             raise typer.Exit(code=1)
         console.print(f"[green]rejected[/] {proposal_id}")
+
+
+def _active_tools(workspace: Path) -> list[str]:
+    """The tool names an agent in this workspace would actually be offered.
+
+    Passing no tools drops every skill that declares ``requires_tools``, which
+    is most of the useful ones -- so the cost line reported zero tokens for a
+    catalog that is not empty, and reported it most confidently about exactly
+    the skills that cost something.
+    """
+    settings = load_settings(workspace=workspace).settings
+    offered = builtin_registry().resolve(enabled_toolsets=settings.enabled_toolsets())
+    return [tool.name for tool in offered]
 
 
 def _project(workspace: Path) -> Path:
