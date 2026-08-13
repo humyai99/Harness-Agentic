@@ -208,12 +208,19 @@ class SkillRegistry:
         2 disclosure was dead everywhere except the bundled directory, which is
         the one root whose path happens not to contain it.
         """
+        root = directory.resolve()
         found: list[str] = []
         for path in sorted(directory.rglob("*")):
             if not path.is_file() or path.name == SKILL_FILE:
                 continue
             relative = path.relative_to(directory)
             if SIDECAR_DIR in relative.parts:
+                continue
+            if root not in path.resolve().parents:
+                # A symlink pointing out of the skill. ``read_resource`` refuses
+                # it either way, so listing it only offers the model a file that
+                # cannot be read -- and a listing whose entries are not all
+                # readable teaches it to treat refusals as noise.
                 continue
             found.append(str(relative))
         return tuple(found)

@@ -268,6 +268,27 @@ def test_reading_a_resource_cannot_escape_the_skill_directory(user_root: Path) -
         registry.read_resource("alpha", "../../../etc/passwd")
 
 
+def test_a_symlink_out_of_the_skill_is_not_offered_as_a_resource(user_root: Path) -> None:
+    """Reading it was already refused; listing it was the leftover.
+
+    Every entry in the listing should be readable. One that is not teaches the
+    model that refusals are noise to route around, which is the opposite of what
+    the containment check is for -- and the listing is the only place it learns
+    what a skill ships.
+    """
+    skill = _skill(user_root, "alpha", files={"references/real.md": "genuine\n"})
+    (user_root / "outside.txt").write_text("not part of the skill\n", encoding="utf-8")
+    (skill / "references" / "escape.md").symlink_to(user_root / "outside.txt")
+
+    registry = _registry(SkillRoot(user_root, TrustLevel.USER))
+    resources = registry.load("alpha").resources
+
+    assert "references/real.md" in resources
+    assert "references/escape.md" not in resources
+    with pytest.raises(SkillError, match="outside the skill directory"):
+        registry.read_resource("alpha", "references/escape.md")
+
+
 def test_resources_are_listed_for_a_skill_living_under_a_dot_harness_root(
     tmp_path: Path,
 ) -> None:
