@@ -25,12 +25,14 @@ from harness_agentic.config import ConfigError, Settings, load_settings
 from harness_agentic.constants import ensure_dirs
 from harness_agentic.errors import CredentialError, HarnessError
 from harness_agentic.mcp.config import McpConfigError, configured_servers
+from harness_agentic.skills.proposals import autonomy_from, default_store
 from harness_agentic.tools.approval import ApprovalPolicy, Mode
 from harness_agentic.tools.paths import looks_like_secret
 
 if TYPE_CHECKING:
     from harness_agentic.envs.base import ExecEnvironment
     from harness_agentic.mcp.stdio import ServerConfig
+    from harness_agentic.skills.proposals import ProposalStore
 
 if TYPE_CHECKING:
     from types import FrameType
@@ -249,12 +251,27 @@ def _build(
             env=environment,
             memory=memory_store(settings),
             mcp_servers=_mcp_servers(),
+            proposal_store=_proposal_store(settings),
             max_iterations=settings.model.max_iterations,
         )
     except CredentialError as exc:
         err_console.print(f"[red]{exc}[/]")
         sys.exit(1)
     return bundle, renderer
+
+
+def _proposal_store(settings: Settings) -> ProposalStore | None:
+    """Where the agent stages a skill it wants to propose.
+
+    Nothing supplied this, so ``skill_propose`` was never registered and the
+    agent had no way to offer a skill at all -- while ``harn skills pending``
+    stood ready to review a queue that nothing could add to. The autonomy
+    setting decides whether an approval still needs a person; ``propose``, the
+    default, means it does.
+    """
+    if not settings.skills.enabled:
+        return None
+    return default_store(autonomy=autonomy_from(settings.skills.autonomy))
 
 
 def _mcp_servers() -> list[ServerConfig]:

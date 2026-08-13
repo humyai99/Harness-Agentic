@@ -336,3 +336,38 @@ def test_a_proposal_made_after_reading_untrusted_content_is_tainted(
     pending = store.pending()
     assert len(pending) == 1, "a tainted proposal must be held, not auto-applied"
     assert pending[0].tainted, "the flag has to be read at call time, not at wiring time"
+
+
+def test_the_cli_gives_an_agent_somewhere_to_propose_into(
+    isolated_home: Path, workspace: Path
+) -> None:
+    """`skill_propose` only exists when a proposal store is supplied.
+
+    Nothing supplied one. So the agent could search, load and read skills and
+    never offer one, while `harn skills pending|diff|approve` stood ready to
+    review a queue nothing could add to -- and reported "nothing is waiting for
+    review", which is what it says when the loop is working and idle. The
+    library writing its own skills is this project's headline feature and it had
+    no entry point on any surface.
+    """
+    from harness_agentic.cli.chat import _proposal_store
+    from harness_agentic.config import Settings
+
+    store = _proposal_store(Settings())
+    assert store is not None
+    assert store.autonomy is Autonomy.PROPOSE, "a human reviews by default"
+
+    bundle = build_agent(
+        model="fake/scripted",
+        workspace=workspace,
+        sessions_dir=isolated_home / "s",
+        toolsets=["skill"],
+        proposal_store=store,
+        transports={"fake": FakeTransport([_text()])},
+    )
+    offered = {tool.name for tool in bundle.registry.resolve(enabled_toolsets=["skill"])}
+    assert "skill_propose" in offered
+
+    # And it is absent when the operator has turned the library off.
+    disabled = Settings.model_validate({"skills": {"enabled": False}})
+    assert _proposal_store(disabled) is None

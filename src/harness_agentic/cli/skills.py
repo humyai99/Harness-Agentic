@@ -32,7 +32,7 @@ from harness_agentic.cli.render import console
 from harness_agentic.config import load_settings
 from harness_agentic.constants import harness_home
 from harness_agentic.skills.model import Lifecycle
-from harness_agentic.skills.proposals import Autonomy, ProposalStore, Quotas
+from harness_agentic.skills.proposals import Autonomy, ProposalStore, default_store
 from harness_agentic.skills.testing import SkillTestRunner, keyword_router
 from harness_agentic.tools.builtin import builtin_registry
 
@@ -250,9 +250,4 @@ def _proposals() -> ProposalStore:
     review surface, and a review command that could auto-apply what it was
     shown would not be one.
     """
-    return ProposalStore(
-        pending_dir=harness_home() / "skills-pending",
-        skills_dir=harness_home() / "skills",
-        autonomy=Autonomy.PROPOSE,
-        quotas=Quotas(),
-    )
+    return default_store(autonomy=Autonomy.PROPOSE)

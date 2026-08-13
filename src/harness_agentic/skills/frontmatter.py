@@ -104,19 +104,19 @@ def parse_frontmatter(raw: str) -> dict[str, Any]:
     stack: list[_Frame] = [_Frame(indent=-1, node=root, parent=None, key=None)]
 
     for number, line in enumerate(raw.splitlines(), start=1):
-        if not line.strip():
-            continue
         indent = len(line) - len(line.lstrip())
         stripped = line.strip()
 
-        # A folded block absorbs every line indented past its key, comments
-        # and colons included -- it is prose, not structure.
+        # A block scalar absorbs every line indented past its key, comments and
+        # colons included -- it is content, not structure. Blank lines included:
+        # they were skipped before reaching here, so a literal block lost every
+        # paragraph break, and markdown written into one came out as a wall.
         top = stack[-1]
-        if isinstance(top.node, _Folded) and indent > top.indent:
-            top.node.append(stripped)
+        if isinstance(top.node, _Folded) and (not stripped or indent > top.indent):
+            top.node.absorb(line)
             continue
 
-        if stripped.startswith("#"):
+        if not stripped or stripped.startswith("#"):
             continue
 
         while len(stack) > 1 and indent <= stack[-1].indent:
@@ -187,7 +187,7 @@ def _assign(
         inner = value[1:-1].strip()
         mapping[key] = [_scalar(p.strip()) for p in inner.split(",") if p.strip()]
     elif value in (">", "|", ">-", "|-"):
-        folded = _Folded()
+        folded = _Folded(literal=value.startswith("|"))
         mapping[key] = folded
         stack.append(_Frame(indent=indent, node=folded, parent=mapping, key=key))
     elif (flow := _flow_mapping(value)) is not None:
@@ -224,7 +224,35 @@ class _Frame:
 
 
 class _Folded(list):  # type: ignore[type-arg]
-    """Accumulates the lines of a folded or literal block scalar."""
+    """Accumulates the lines of a folded or literal block scalar.
+
+    ``literal`` is what tells the two apart at the end. Both markers used to
+    produce the same joined-with-spaces string, so ``|`` silently folded -- and
+    a value whose newlines carry meaning was destroyed by being read. A skill
+    proposal's ``tests_yaml`` is the sharp case: it is YAML, so folding it to one
+    line makes it unparseable, and the tests then come out empty exactly the way
+    a flow-mapping bug in ``cases.yaml`` once made them empty.
+    """
+
+    def __init__(self, *, literal: bool) -> None:
+        """Start an empty block, remembering which marker opened it."""
+        super().__init__()
+        self.literal = literal
+        self.base: int | None = None
+        """Indentation of the block's first line, stripped from all of them.
+
+        Relative indentation has to survive, or a literal block cannot hold
+        anything structured. Every line was being ``strip()``ed, so a nested
+        YAML list came out flush left -- which then parsed as a sibling of its
+        own parent key and raised. Same for markdown: an indented code block or
+        a nested list arrived flat.
+        """
+
+    def absorb(self, line: str) -> None:
+        """Take one raw line, keeping the indentation past the block's base."""
+        if self.base is None and line.strip():
+            self.base = len(line) - len(line.lstrip())
+        self.append(line)
 
 
 def _is_quoted(text: str) -> bool:
@@ -289,7 +317,11 @@ def _flow_mapping(text: str) -> dict[str, Any] | None:
 def _finalize(node: Any) -> Any:
     """Collapse folded blocks and undecided containers."""
     if isinstance(node, _Folded):
-        return " ".join(str(x) for x in node).strip()
+        base = node.base or 0
+        if node.literal:
+            kept = [str(line)[base:] if str(line).strip() else "" for line in node]
+            return "\n".join(kept).strip()
+        return " ".join(str(line).strip() for line in node if str(line).strip()).strip()
     if isinstance(node, dict):
         return {k: _finalize(v) for k, v in node.items()}
     if isinstance(node, list):

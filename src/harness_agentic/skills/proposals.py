@@ -31,6 +31,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from harness_agentic.constants import harness_home
 from harness_agentic.errors import SkillQuotaExceeded
 from harness_agentic.skills.validator import (
     CandidateSkill,
@@ -173,6 +174,41 @@ class ApplyResult:
     applied: bool
     path: Path | None
     reason: str
+
+
+def default_store(*, autonomy: Autonomy = Autonomy.PROPOSE) -> ProposalStore:
+    """The staging area every surface shares.
+
+    One factory because the two callers must agree on the directories. They did
+    not: ``harn skills pending|diff|approve`` built a store to review proposals
+    with, and no agent was ever given one -- so ``skill_propose`` was never
+    registered and the review queue could only ever be empty. The library's
+    headline feature had no entry point on any surface, and the command that
+    would have shown that reported "nothing is waiting for review", which is
+    what it says when the loop is working and idle.
+
+    Autonomy is a parameter because the review commands must pin it to
+    ``PROPOSE`` whatever a session was configured with: a review surface that
+    could auto-apply what it was shown would not be one.
+    """
+    return ProposalStore(
+        pending_dir=harness_home() / "skills-pending",
+        skills_dir=harness_home() / "skills",
+        autonomy=autonomy,
+    )
+
+
+def autonomy_from(value: str) -> Autonomy:
+    """Read the configured autonomy, falling back to review on anything odd.
+
+    An unrecognised value means review rather than an error: this setting decides
+    whether an agent may write to its own prompt library without a human, and the
+    safe reading of a typo is the strict one.
+    """
+    try:
+        return Autonomy(value)
+    except ValueError:
+        return Autonomy.PROPOSE
 
 
 class ProposalStore:

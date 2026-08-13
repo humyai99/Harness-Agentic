@@ -777,3 +777,48 @@ def test_a_list_item_takes_the_same_value_forms_a_mapping_does() -> None:
     assert first["arguments"] == {"path": "a.txt"}
     assert first["tags"] == ["one", "two"]
     assert second == {"text": "plain"}
+
+
+def test_a_literal_block_keeps_its_newlines_and_its_shape() -> None:
+    """``|`` and ``>`` were the same thing, and both destroyed structure.
+
+    Both markers produced one space-joined line, every line was ``strip()``ed,
+    and blank lines were dropped before the block ever saw them. So a literal
+    block could hold prose and nothing else: nested YAML came out flush left,
+    markdown came out as a wall, and an indented step lost its indentation.
+
+    A skill proposal carries both a ``tests_yaml`` and a whole ``SKILL.md``
+    through this reader, so the loop that writes skills could not carry its own
+    payload -- the proposal was staged and then blocked by its own tests failing
+    to parse.
+    """
+    parsed = parse_frontmatter(
+        "cases: |\n"
+        "  cases:\n"
+        "    - {id: a}\n"
+        "    - {id: b}\n"
+        "doc: |\n"
+        "  ## Heading\n"
+        "\n"
+        "  A paragraph.\n"
+        "\n"
+        "  1. step one\n"
+        "     continued\n"
+        "prose: >\n"
+        "  folded across\n"
+        "  two lines\n"
+    )
+
+    # Relative indentation survives, so the value parses as YAML in its own right.
+    assert parse_frontmatter(parsed["cases"]) == {"cases": [{"id": "a"}, {"id": "b"}]}
+    # Paragraph breaks and continuation lines survive.
+    assert parsed["doc"] == "## Heading\n\nA paragraph.\n\n1. step one\n   continued"
+    # And a folded block still folds, which is what a description wants.
+    assert parsed["prose"] == "folded across two lines"
+
+
+def test_a_block_scalar_ends_where_the_indentation_does() -> None:
+    # A blank line inside the block belongs to it; a dedented key does not.
+    parsed = parse_frontmatter("body: |\n  first\n\n  second\nname: after\n")
+    assert parsed["body"] == "first\n\nsecond"
+    assert parsed["name"] == "after"
