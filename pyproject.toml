@@ -67,8 +67,11 @@ path = "src/harness_agentic/version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/harness_agentic"]
-# schema.sql and prompt templates are read at runtime, so they have to ship.
-artifacts = ["*.sql", "*.md"]
+# schema.sql, prompt templates and the bundled scenarios are read at runtime,
+# so they have to ship. Without the scenarios, an installed `harn` has nothing
+# to try `fake/scripted` against and the first thing anyone does after
+# installing fails.
+artifacts = ["*.sql", "*.md", "*.yaml"]
 
 # ---------------------------------------------------------------- ruff ------
 

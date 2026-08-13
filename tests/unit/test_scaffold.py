@@ -118,3 +118,37 @@ def test_harn_sessions_reads_the_store_the_agent_writes(
 
     assert result.exit_code == 0
     assert record.id in result.stdout
+
+
+def test_the_tour_scenario_ships_and_resolves_by_name() -> None:
+    """An installed `harn` has only what is in the wheel.
+
+    A checkout can point `HARNESS_FAKE_SCRIPT` at a path; someone who ran
+    `uv tool install` has no such file, so the first thing they do after
+    installing -- try it -- failed on a missing path. The scenario is package
+    data now, and this fails if it stops being shipped or stops parsing, which
+    are both silent until a new user hits them.
+    """
+    from harness_agentic.testing.scenario import bundled_scenarios, load_scenario, resolve_scenario
+
+    assert "tour" in bundled_scenarios()
+    turns = load_scenario(resolve_scenario("tour"))
+    assert turns, "the bundled tour parsed to no turns"
+    assert any(turn.tool_calls for turn in turns), "a tour with no tool call shows nothing"
+
+
+def test_an_unknown_scenario_name_lists_the_ones_that_exist() -> None:
+    from harness_agentic.errors import HarnessError
+    from harness_agentic.testing.scenario import resolve_scenario
+
+    with pytest.raises(HarnessError, match="available: tour"):
+        resolve_scenario("nope")
+
+
+def test_a_path_that_does_not_exist_is_reported_as_a_path() -> None:
+    # Not as "unknown bundled scenario", which would send someone looking in
+    # the package rather than at the path they typed.
+    from harness_agentic.testing.scenario import resolve_scenario
+
+    assert str(resolve_scenario("scenarios/mine.yaml")).endswith("scenarios/mine.yaml")
+    assert str(resolve_scenario("mine.yaml")).endswith("mine.yaml")

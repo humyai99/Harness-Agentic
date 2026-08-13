@@ -47,6 +47,40 @@ class ScenarioError(HarnessError):
     """A scenario file could not be read."""
 
 
+BUNDLED = Path(__file__).with_name("scenarios")
+"""Scenarios that ship with the package.
+
+They ship because otherwise the first thing anyone does after installing --
+try the thing -- fails on a missing file. A checkout has ``examples/``; an
+install has only what is in the wheel.
+"""
+
+
+def bundled_scenarios() -> list[str]:
+    """The names that can be used instead of a path."""
+    return sorted(path.stem for path in BUNDLED.glob("*.yaml"))
+
+
+def resolve_scenario(location: str) -> Path:
+    """Turn ``HARNESS_FAKE_SCRIPT`` into a file.
+
+    A bare name is one of the bundled scenarios; anything with a separator or a
+    suffix is a path. Resolved this way round so that a name that is *meant* as
+    a path and happens not to exist reports the path, rather than reporting that
+    it is not a known bundled scenario -- which would send someone looking in
+    entirely the wrong place.
+    """
+    candidate = Path(location).expanduser()
+    if candidate.suffix or len(candidate.parts) > 1:
+        return candidate
+    bundled = BUNDLED / f"{location}.yaml"
+    if bundled.is_file():
+        return bundled
+    known = ", ".join(bundled_scenarios()) or "none"
+    msg = f"no bundled scenario named {location!r}; available: {known}"
+    raise ScenarioError(msg)
+
+
 def parse_scenario(raw: str) -> list[ScriptedTurn]:
     """Read a scenario into the turns the fake provider will replay.
 
@@ -132,13 +166,15 @@ def scripted_transport(
     """
     location = os.environ.get(SCRIPT_ENV, "").strip()
     if not location:
+        known = ", ".join(bundled_scenarios()) or "none"
         msg = (
             f"the fake provider needs a scenario: set {SCRIPT_ENV} to a YAML file "
-            f"listing the turns to replay, or choose a real model with --model"
+            f"listing the turns to replay, to one of the bundled scenarios "
+            f"({known}), or choose a real model with --model"
         )
         raise ScenarioError(msg)
     return FakeTransport(
-        load_scenario(Path(location).expanduser()),
+        load_scenario(resolve_scenario(location)),
         credentials=credentials,
         clock=clock,
         model=model,
