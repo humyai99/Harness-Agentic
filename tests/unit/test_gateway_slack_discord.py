@@ -162,6 +162,29 @@ async def test_slack_strips_the_mention_before_the_model_sees_it() -> None:
     assert event.text == "deploy staging"
 
 
+async def test_slack_strips_only_its_own_handle() -> None:
+    """Other people's mentions are the content, not the addressing.
+
+    Stripping every ``<@U…>`` turned "ask <@UALICE> about the deploy" into "ask
+    about the deploy" -- the model was told to ask someone, with the someone
+    deleted. Asking a colleague is most of what a Slack bot gets asked to do.
+    """
+    adapter = slack_adapter()
+    event = adapter.normalize(
+        json.loads(slack_event(f"<@{BOT}> please ask <@UALICE> about the deploy"))
+    )
+    assert event is not None
+    assert event.text == "please ask <@UALICE> about the deploy"
+
+
+async def test_slack_does_not_retry_a_body_of_the_wrong_shape() -> None:
+    # Valid JSON, not an object. It used to raise -- and Slack answers a 500 by
+    # retrying, three times, for a body that will never parse.
+    adapter = slack_adapter()
+    body = b'"just a string"'
+    assert (await adapter.handle_webhook(body, slack_sign(body))).status == 200
+
+
 async def test_slack_counts_retries_and_keeps_the_event_id_stable() -> None:
     # The deduplicator upstream keys on event_id, which Slack holds constant
     # across the retries its own three-second timeout causes.

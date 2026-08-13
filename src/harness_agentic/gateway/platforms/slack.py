@@ -50,7 +50,6 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 API_ROOT = "https://slack.com/api"
-_MENTION = re.compile(r"<@([A-Z0-9]+)>")
 _BOT_SUBTYPES = frozenset({"bot_message", "message_changed", "message_deleted"})
 
 
@@ -132,6 +131,12 @@ class SlackAdapter(QueueAdapter):
         except ValueError:
             log.warning("slack webhook body was not JSON")
             return WebhookResponse(status=200, body=b"ignored")
+        if not isinstance(payload, dict):
+            # Valid JSON, wrong shape. Raising here would be a 500, and Slack
+            # answers a 500 by retrying -- three times, for a body no version of
+            # this code will ever parse.
+            log.warning("slack webhook body was not a JSON object")
+            return WebhookResponse(status=200, body=b"ignored")
 
         if payload.get("type") == "url_verification":
             # Echoed once when the endpoint is configured. Slack refuses to
@@ -175,8 +180,12 @@ class SlackAdapter(QueueAdapter):
             or not self.require_mention_in_channels
             or self._addressed(text)
         )
-        if self.bot_user_id:
-            text = _MENTION.sub("", text).strip() if mentioned else text
+        if self.bot_user_id and mentioned:
+            # Only this bot's own handle. Stripping every ``<@U…>`` also erased
+            # the colleagues a request was about -- "ask <@UALICE> about the
+            # deploy" reached the model as "ask about the deploy", with the one
+            # piece of information that made it actionable removed.
+            text = _own_mention(self.bot_user_id).sub("", text).strip()
 
         # The thread the reply belongs in -- a reply's own thread, or the
         # message itself if it starts one. This is the session, and it is why
@@ -270,6 +279,11 @@ def to_mrkdwn(text: str) -> str:
         converted = re.sub(r"^#{1,6}\s+(.+)$", r"*\1*", converted, flags=re.MULTILINE)
         out.append(converted)
     return "".join(out)
+
+
+def _own_mention(bot_user_id: str) -> re.Pattern[str]:
+    """A pattern matching only this bot's handle."""
+    return re.compile(rf"<@{re.escape(bot_user_id)}>")
 
 
 def _header(headers: Mapping[str, str], name: str) -> str:
