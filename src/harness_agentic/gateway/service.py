@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from harness_agentic.errors import AdapterError
+from harness_agentic.gateway.adapter import QueueAdapter
 from harness_agentic.gateway.types import Route, Transport
 
 if TYPE_CHECKING:
@@ -106,13 +107,11 @@ class Gateway:
                 status.last_error = str(exc)
                 log.exception("could not start %s", adapter.platform)
                 continue
-            status.state = "running"
-            if adapter.transport in (Transport.POLL, Transport.SOCKET):
+            status.state = _steady_state(adapter)
+            if _needs_draining(adapter):
                 self._tasks[adapter.platform] = asyncio.create_task(
                     self._supervise(adapter), name=f"gateway:{adapter.platform}"
                 )
-            else:
-                status.state = "listening"
 
     async def _supervise(self, adapter: PlatformAdapter) -> None:
         """Consume an adapter's events, restarting it if it dies."""
@@ -134,7 +133,7 @@ class Gateway:
                 backoff = min(RESTART_BACKOFF_MAX_S, backoff * 2)
                 with contextlib.suppress(Exception):
                     await adapter.connect()
-                status.state = "running"
+                status.state = _steady_state(adapter)
             else:
                 return
 
@@ -247,6 +246,26 @@ class Gateway:
         lines = [status.line() for status in self.statuses.values()]
         lines.extend(self.router.status_lines())
         return lines
+
+
+def _needs_draining(adapter: PlatformAdapter) -> bool:
+    """Whether something has to consume this adapter's events.
+
+    Webhook adapters included, which is the part that is easy to get wrong.
+    Their HTTP handler only parks the event on a queue and returns 200 -- that
+    is what "answer quickly" means -- so a queue nobody drains is a gateway that
+    accepts every delivery, reports itself healthy, and never replies to
+    anything. The platform sees 200 and does not retry, so the failure is
+    completely silent from both ends.
+    """
+    return adapter.transport in (Transport.POLL, Transport.SOCKET) or isinstance(
+        adapter, QueueAdapter
+    )
+
+
+def _steady_state(adapter: PlatformAdapter) -> str:
+    """What to call an adapter that is up: webhooks listen, the rest run."""
+    return "listening" if adapter.transport is Transport.WEBHOOK else "running"
 
 
 def _reject_duplicates(routes: Sequence[Route]) -> None:

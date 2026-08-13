@@ -9,19 +9,22 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
 import pytest
 
 from harness_agentic.errors import AdapterError
-from harness_agentic.gateway.adapter import PlatformAdapter
+from harness_agentic.gateway.adapter import PlatformAdapter, QueueAdapter
 from harness_agentic.gateway.platforms.fake import FakeAdapter
 from harness_agentic.gateway.service import Gateway
 from harness_agentic.gateway.types import (
     Capabilities,
+    ChatKind,
     DeliveryTarget,
     MessageEvent,
     OutboundMessage,
     Route,
+    Sender,
     SentRef,
     Transport,
     WebhookResponse,
@@ -111,6 +114,32 @@ class WebhookOnly(PlatformAdapter):
         return (Route(path=self._path, handler=handler),)  # type: ignore[arg-type]
 
 
+class QueueingWebhook(QueueAdapter):
+    """A webhook adapter shaped like the real ones: queue, then answer 200."""
+
+    platform = "queueing"
+    transport = Transport.WEBHOOK
+    capabilities = Capabilities()
+
+    async def send(self, target: DeliveryTarget, message: OutboundMessage) -> SentRef:
+        raise NotImplementedError
+
+    async def deliver(self, text: str) -> WebhookResponse:
+        """What the HTTP handler does once a signature has checked out."""
+        self.offer(
+            MessageEvent(
+                platform=self.platform,
+                chat_id="U1",
+                chat_kind=ChatKind.PRIVATE,
+                sender=Sender(id="U1"),
+                text=text,
+                received_at=datetime.now(UTC),
+                message_id="m1",
+            )
+        )
+        return WebhookResponse(status=200)
+
+
 async def test_one_platform_failing_to_start_does_not_stop_the_others() -> None:
     working = FakeAdapter()
     gateway = Gateway(router=Recorder(), adapters=[BrokenAdapter(), working])  # type: ignore[arg-type]
@@ -173,6 +202,36 @@ async def test_a_webhook_adapter_is_listening_not_polling() -> None:
     assert gateway.statuses["hooky"].state == "listening"
     assert [r.path for r in gateway.routes()] == ["/webhooks/x"]
     await gateway.stop()
+
+
+async def test_a_signed_webhook_delivery_reaches_the_router() -> None:
+    """The whole point of a webhook adapter, and it was never wired up.
+
+    A webhook handler must answer fast, so it parks the event on a queue and
+    returns 200. Nothing drained that queue: only poll and socket adapters got
+    a task. So LINE and Slack verified every delivery, answered 200, and never
+    replied to a single message -- and because 200 means success, the platform
+    did not retry and nothing anywhere reported a problem. The gateway said
+    "listening" the entire time.
+    """
+    adapter = QueueingWebhook()
+    router = Recorder()
+    gateway = Gateway(router=router, adapters=[adapter])  # type: ignore[arg-type]
+    await gateway.start()
+
+    assert (await adapter.deliver("deploy staging")).status == 200
+    await _settle()
+
+    assert [e.text for e in router.events] == ["deploy staging"]
+    # Still reported as a listener, not a poller -- the label was never wrong.
+    assert gateway.statuses["queueing"].state == "listening"
+    await gateway.stop()
+
+
+async def _settle() -> None:
+    """Let the drain task pick up whatever was just queued."""
+    for _ in range(10):
+        await asyncio.sleep(0)
 
 
 def test_two_adapters_claiming_one_path_is_refused() -> None:

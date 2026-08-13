@@ -12,8 +12,14 @@ interruption rather than about a smoke test that sent one "hello".
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
+import json
+from datetime import UTC, datetime
 from pathlib import Path
 
+import httpx
 import pytest
 
 from harness_agentic.agent.build import AgentBundle, build_agent
@@ -21,9 +27,12 @@ from harness_agentic.core.events import EventSink
 from harness_agentic.errors import AuthError
 from harness_agentic.gateway.authz import Authorizer, PlatformAuth
 from harness_agentic.gateway.platforms.fake import FakeAdapter, line_like, telegram_like
+from harness_agentic.gateway.platforms.line import LineAdapter
 from harness_agentic.gateway.ratelimit import Limit, RateLimiter
 from harness_agentic.gateway.router import Router
+from harness_agentic.gateway.service import Gateway
 from harness_agentic.gateway.types import ChatKind, MessageEvent
+from harness_agentic.providers.credentials import Secret
 from harness_agentic.testing import FakeTransport, ScriptedTurn, text_turn, tool_turn
 from harness_agentic.tools.approval import ApprovalPolicy, Mode
 
@@ -392,3 +401,94 @@ async def test_the_same_answer_is_shaped_per_platform(workspace: Path, tmp_path:
     # one would be a metered push and an unwanted notification.
     assert telegram.adapter.of_kind("status")
     assert not line.adapter.of_kind("status")
+
+
+async def test_a_signed_line_webhook_is_answered_end_to_end(
+    workspace: Path, tmp_path: Path
+) -> None:
+    """The M5 acceptance criterion, through the real adapter and a real Gateway.
+
+    Every other test here calls ``Router.handle`` directly, which is why nothing
+    noticed that ``Gateway.start`` never drained a webhook adapter's queue: LINE
+    verified the signature, answered 200, parked the event, and stopped. The
+    platform treats 200 as delivered, so there was no retry and no error
+    anywhere -- just an account that never replied.
+    """
+    posted: list[dict[str, object]] = []
+
+    def line_api(request: httpx.Request) -> httpx.Response:
+        posted.append(json.loads(request.content))
+        return httpx.Response(200, json={})
+
+    adapter = LineAdapter(
+        channel_secret=Secret(CHANNEL_SECRET, source="test"),
+        access_token=Secret("line-access-token", source="test"),
+        client=httpx.AsyncClient(transport=httpx.MockTransport(line_api)),
+    )
+    transport = FakeTransport([text_turn("staging is deployed")])
+
+    async def factory(key: str, _event: MessageEvent, sink: EventSink) -> AgentBundle:
+        return build_agent(
+            model="fake/scripted",
+            workspace=workspace,
+            sessions_dir=tmp_path / "sessions" / _slug(key),
+            toolsets=["file"],
+            surface="gateway",
+            emit=sink,
+            approval=ApprovalPolicy(surface="gateway", modes={"gateway": Mode.ALLOW}),
+            transports={"fake": transport},
+        )
+
+    router = Router(
+        adapters={"line": adapter},
+        authorizer=Authorizer(global_allow_all=True),
+        bundle_factory=factory,
+        limiter=RateLimiter(exempt=frozenset({"line:Uuser1"})),
+    )
+    gateway = Gateway(router=router, adapters=[adapter])
+    await gateway.start()
+
+    body = _line_delivery("deploy staging")
+    response = await adapter.handle_webhook(body, _sign(body))
+    assert response.status == 200
+
+    # Yield until the drain task has taken the event off the adapter's queue
+    # and the router has built an actor for it; then wait on the actor itself.
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if router.actors.actors:
+            break
+    async with asyncio.timeout(10):
+        await router.actors.wait_idle()
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    await gateway.stop()
+
+    said = [str(m["text"]) for call in posted for m in call["messages"]]  # type: ignore[union-attr]
+    assert "staging is deployed" in "\n".join(said)
+
+
+CHANNEL_SECRET = "line-channel-secret"
+
+
+def _sign(body: bytes) -> dict[str, str]:
+    digest = hmac.new(CHANNEL_SECRET.encode(), body, hashlib.sha256).digest()
+    return {"X-Line-Signature": base64.b64encode(digest).decode()}
+
+
+def _line_delivery(text: str) -> bytes:
+    return json.dumps(
+        {
+            "destination": "Uabc",
+            "events": [
+                {
+                    "type": "message",
+                    "replyToken": "reply-token-1",
+                    "timestamp": int(datetime.now(UTC).timestamp() * 1000),
+                    "source": {"type": "user", "userId": "Uuser1"},
+                    "message": {"id": "m1", "type": "text", "text": text},
+                }
+            ],
+        }
+    ).encode()
