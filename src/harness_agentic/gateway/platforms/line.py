@@ -138,6 +138,12 @@ class LineAdapter(QueueAdapter):
         except ValueError:
             log.warning("line webhook body was not JSON")
             return WebhookResponse(status=200, body=b"ignored")
+        if not isinstance(payload, dict):
+            # Valid JSON, wrong shape. Answering 200 is the documented contract
+            # above, and it is what stops LINE redelivering a body forever that
+            # no version of this code will ever parse.
+            log.warning("line webhook body was not a JSON object")
+            return WebhookResponse(status=200, body=b"ignored")
 
         events = payload.get("events") or []
         if not events:
@@ -169,6 +175,7 @@ class LineAdapter(QueueAdapter):
         timestamp = float(raw.get("timestamp", 0)) / 1000.0
         reply_token = str(raw.get("replyToken") or "")
         if reply_token and chat_id:
+            self._forget_expired_tokens()
             self._reply_tokens[chat_id] = (reply_token, timestamp)
 
         return MessageEvent(
@@ -205,20 +212,40 @@ class LineAdapter(QueueAdapter):
         return SentRef(platform=self.platform, chat_id=target.chat_id, message_id="")
 
     def _claim_reply_token(self, target: DeliveryTarget) -> str:
-        """Take the reply token for this chat, if one is still plausible.
+        """Take the reply token for this chat, if one is still unspent.
 
-        Removed as it is handed out: the token is single-use, and a second
-        attempt with the same one fails in a way that costs a message.
+        What the adapter has recorded is the authority, not what the target
+        carries. A target is one object reused for every chunk of an answer, so
+        trusting its ``reply_to`` meant replaying a single-use token on chunk
+        two, chunk three, and so on -- each one a guaranteed 400 followed by a
+        push. The answer still arrived, so nothing failed visibly; it just cost
+        an extra round trip per chunk, on a platform that meters messages.
         """
-        if target.reply_to:
-            self._reply_tokens.pop(target.chat_id, None)
-            return target.reply_to
-        entry = self._reply_tokens.pop(target.chat_id, None)
+        entry = self._reply_tokens.get(target.chat_id)
         if entry is None:
+            # Spent on an earlier chunk, or from a delivery this process never
+            # saw. Either way the only thing left that works is push.
             return ""
         token, issued_at = entry
+        if target.reply_to and target.reply_to != token:
+            # The turn is answering an older message than the last one to
+            # arrive. Leave the newer token for the turn it belongs to.
+            return ""
+        del self._reply_tokens[target.chat_id]
         age = datetime.now(UTC).timestamp() - issued_at
         return token if age <= REPLY_TOKEN_BUDGET_S else ""
+
+    def _forget_expired_tokens(self) -> None:
+        """Drop tokens too old to use.
+
+        A token whose turn never sent anything -- an unauthorized sender, a
+        command answered inline -- is otherwise held for the life of the process,
+        one per chat that has ever spoken.
+        """
+        cutoff = datetime.now(UTC).timestamp() - REPLY_TOKEN_BUDGET_S
+        for chat_id, (_, issued_at) in list(self._reply_tokens.items()):
+            if issued_at < cutoff:
+                del self._reply_tokens[chat_id]
 
     async def _call(self, path: str, payload: Mapping[str, Any]) -> None:
         """One Messaging API call."""

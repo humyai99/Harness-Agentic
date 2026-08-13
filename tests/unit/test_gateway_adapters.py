@@ -14,6 +14,7 @@ import base64
 import hashlib
 import hmac
 import json
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -160,16 +161,32 @@ def line_adapter(handler: Any = None) -> LineAdapter:
     )
 
 
-def line_payload(text: str = "hello", *, message_id: str = "m1") -> bytes:
+def line_payload(
+    text: str = "hello",
+    *,
+    message_id: str = "m1",
+    user_id: str = "Uuser1",
+    reply_token: str = "reply-token-1",
+    timestamp_ms: int | None = None,
+) -> bytes:
+    """A signed-delivery body.
+
+    The timestamp defaults to now because the adapter judges a reply token by
+    its age: a fixture pinned to a past date makes every token look expired, and
+    a test written against it asserts the push path while believing it covers
+    the reply one.
+    """
     return json.dumps(
         {
             "destination": "Uabc",
             "events": [
                 {
                     "type": "message",
-                    "replyToken": "reply-token-1",
-                    "timestamp": 1767225600000,
-                    "source": {"type": "user", "userId": "Uuser1"},
+                    "replyToken": reply_token,
+                    "timestamp": timestamp_ms
+                    if timestamp_ms is not None
+                    else int(datetime.now(UTC).timestamp() * 1000),
+                    "source": {"type": "user", "userId": user_id},
                     "message": {"id": message_id, "type": "text", "text": text},
                 }
             ],
@@ -235,23 +252,76 @@ async def test_line_uses_the_reply_token_once_then_pushes() -> None:
     assert calls == ["reply", "push"]
 
 
-async def test_line_falls_back_to_push_when_the_token_is_stale() -> None:
+async def test_line_does_not_replay_the_token_across_chunks_of_one_answer() -> None:
+    """The delivery layer reuses one target for every chunk it sends.
+
+    So a target's ``reply_to`` is present on chunk two and chunk three as well,
+    and honouring it there replayed a single-use token: a guaranteed 400 and a
+    push behind it, per chunk. The answer still arrived, which is why nothing
+    caught it -- it just cost an extra round trip each time, on the one platform
+    that meters messages.
+    """
     calls: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         endpoint = request.url.path.rsplit("/", 1)[-1]
         calls.append(endpoint)
-        if endpoint == "reply":
+        if endpoint == "reply" and calls.count("reply") > 1:
             return httpx.Response(400, text="Invalid reply token")
         return httpx.Response(200, json={})
 
     adapter = line_adapter(handler)
-    target = DeliveryTarget("line", "Uuser1", reply_to="expired-token")
+    body = line_payload()
+    await adapter.handle_webhook(body, sign(body))
+    event = await anext(adapter.poll())
+
+    target = DeliveryTarget("line", event.chat_id, reply_to=event.reply_to)
+    for index in range(3):
+        await adapter.send(target, OutboundMessage(f"chunk {index}"))
+
+    assert calls == ["reply", "push", "push"]
+
+
+async def test_line_does_not_try_a_token_it_never_issued() -> None:
+    """A token this process did not record cannot be spent usefully.
+
+    It is either already used or from before a restart, so attempting it buys a
+    round trip and a 400. The message still has to arrive, so it goes by push.
+    """
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path.rsplit("/", 1)[-1])
+        return httpx.Response(200, json={})
+
+    adapter = line_adapter(handler)
+    target = DeliveryTarget("line", "Uuser1", reply_to="a-token-from-a-previous-process")
     await adapter.send(target, OutboundMessage("late answer"))
 
-    # The message still arrives; losing it because a token aged out would be
-    # the agent silently failing to answer.
-    assert calls == ["reply", "push"]
+    assert calls == ["push"]
+
+
+async def test_line_does_not_hoard_reply_tokens_for_turns_that_never_answered() -> None:
+    # An unauthorized sender or a command answered inline leaves a token nobody
+    # claims. One per chat that has ever spoken, held for the life of the
+    # process, is a leak with a slow fuse.
+    adapter = line_adapter()
+    stale = line_payload(user_id="Uold", reply_token="old-token", timestamp_ms=1767225600000)
+    await adapter.handle_webhook(stale, sign(stale))
+
+    fresh = line_payload(message_id="m2")
+    await adapter.handle_webhook(fresh, sign(fresh))
+
+    assert "Uold" not in adapter._reply_tokens
+
+
+async def test_line_does_not_redeliver_a_body_of_the_wrong_shape() -> None:
+    # Valid JSON, not an object. It used to raise, which meant a 500 and LINE
+    # redelivering a body no version of this code will ever parse.
+    adapter = line_adapter()
+    body = b"[1, 2, 3]"
+    response = await adapter.handle_webhook(body, sign(body))
+    assert response.status == 200
 
 
 async def test_line_declares_that_it_cannot_edit() -> None:
