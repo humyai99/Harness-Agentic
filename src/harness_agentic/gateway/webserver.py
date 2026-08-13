@@ -18,6 +18,7 @@ Two defaults here are security decisions rather than conveniences:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
@@ -100,13 +101,25 @@ class WebhookApp:
         return b"".join(chunks)
 
     async def _lifespan(self, receive: Receive, send: Send) -> None:
-        while True:
-            message = await receive()
-            if message["type"] == "lifespan.startup":
-                await send({"type": "lifespan.startup.complete"})
-            elif message["type"] == "lifespan.shutdown":
-                await send({"type": "lifespan.shutdown.complete"})
-                return
+        """Answer the ASGI lifespan handshake until the server goes away.
+
+        Cancellation is a normal ending, not a fault. The gateway stops its
+        server by cancelling the task, and letting that propagate made uvicorn
+        log ``ERROR: Exception in 'lifespan' protocol`` with a traceback on every
+        clean Ctrl-C. An operator who is shown a stack trace each time they stop
+        the process correctly learns to ignore this one, and then ignores the
+        next one too.
+        """
+        try:
+            while True:
+                message = await receive()
+                if message["type"] == "lifespan.startup":
+                    await send({"type": "lifespan.startup.complete"})
+                elif message["type"] == "lifespan.shutdown":
+                    await send({"type": "lifespan.shutdown.complete"})
+                    return
+        except asyncio.CancelledError:
+            return
 
 
 async def serve(

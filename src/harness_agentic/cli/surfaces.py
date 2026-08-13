@@ -85,7 +85,22 @@ def _register_web(app: typer.Typer) -> None:
             """Replaced below, once `bundle_for` exists to close over."""
             del session, prompt
 
-        api = Api(token=secret, run_turn=not_yet, include_thinking=thinking)
+        def live_sessions() -> list[dict[str, object]]:
+            """What the browser lists.
+
+            Without this the endpoint answered ``[]`` forever, which reads as
+            "you have no sessions" rather than as "this was never wired up".
+            """
+            return [
+                {
+                    "id": name,
+                    "session": bundle.context.session_id,
+                    "turns": len(bundle.store.history(bundle.context.session_id)),
+                }
+                for name, bundle in sorted(bundles.items())
+            ]
+
+        api = Api(token=secret, run_turn=not_yet, include_thinking=thinking, sessions=live_sessions)
 
         def bundle_for(session: str) -> AgentBundle:
             if session not in bundles:
