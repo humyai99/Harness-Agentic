@@ -103,7 +103,14 @@ class RunContext:
 
 
 class _ContextAdapter:
-    """Bridges :class:`RunContext` onto the ToolContext protocol."""
+    """Bridges :class:`RunContext` onto the ToolContext protocol.
+
+    A view, not a copy. ``cancel`` in particular is read through on every access:
+    the runner swaps in a fresh token at the start of each turn, and an adapter
+    holding a snapshot would hand tools the previous turn's token -- which, once
+    a turn had been interrupted, meant every command the conversation ran after
+    that was killed the moment it started.
+    """
 
     def __init__(self, inner: RunContext) -> None:
         self._inner = inner
@@ -111,8 +118,16 @@ class _ContextAdapter:
         self.workspace_root = inner.workspace_root
         self.cwd = inner.cwd
         self.env = inner.env
-        self.cancel = inner.cancel
         self.surface = inner.surface
+
+    @property
+    def cancel(self) -> CancelToken:
+        """The token for the turn in flight, whichever one that now is."""
+        return self._inner.cancel
+
+    @cancel.setter
+    def cancel(self, token: CancelToken) -> None:
+        self._inner.cancel = token
 
     def emit(self, message: str) -> None:
         """Forward a tool's progress line onto the event stream."""

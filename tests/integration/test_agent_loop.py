@@ -22,6 +22,7 @@ from harness_agentic.core.events import (
     ToolCallStarted,
     TurnFinished,
 )
+from harness_agentic.core.types import ToolResultBlock
 from harness_agentic.errors import AuthError, RateLimited
 from harness_agentic.testing import FakeTransport, ScriptedTurn, text_turn, tool_turn
 from harness_agentic.tools.approval import ApprovalPolicy, Mode, always_deny
@@ -357,3 +358,43 @@ def test_the_turn_finishes_with_a_usage_report(workspace: Path, tmp_path: Path) 
     assert finished.reason == "completed"
     assert finished.usage.output_tokens > 0
     assert events.of_type(TextChunk)
+
+
+def test_an_interrupt_does_not_outlive_the_turn_it_stopped(workspace: Path, tmp_path: Path) -> None:
+    """The loop and the commands it runs must share one token, per turn.
+
+    They were two objects: the loop minted a fresh one each turn and the tool
+    context kept the one it was built with. So a conversation that had been
+    interrupted once went on killing every command it ran afterwards -- the turn
+    reported ``completed``, the shell reported exit ``-15``, and nothing said
+    why. On a chat platform that is one "wait, do this instead" away.
+    """
+    bundle, _, _ = _agent(
+        workspace,
+        tmp_path,
+        [
+            text_turn("first answer"),
+            tool_turn("terminal", {"command": "echo still-working"}),
+            text_turn("second answer"),
+        ],
+    )
+    session = bundle.store.latest()
+    assert session is not None
+    bundle.runner.run_turn("hi", session=session)
+
+    # Exactly what the gateway does when a follow-up message arrives.
+    bundle.runner.cancel.cancel("a newer message arrived")
+    bundle.context.cancel.cancel("a newer message arrived")
+
+    result = bundle.runner.run_turn("now run a command", session=session)
+
+    assert result.exit_reason == "completed"
+    assert not bundle.context.cancel.is_set(), "the tools kept the cancelled token"
+    transcript = "\n".join(
+        block.text
+        for message in bundle.store.history(session.id)
+        for block in message.content
+        if isinstance(block, ToolResultBlock)
+    )
+    assert "still-working" in transcript
+    assert "exit code -15" not in transcript, "the command was killed before it ran"

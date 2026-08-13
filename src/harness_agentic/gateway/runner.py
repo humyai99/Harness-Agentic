@@ -29,6 +29,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from harness_agentic.agent.build import AgentBundle
+from harness_agentic.core.cancel import CancelToken
 from harness_agentic.core.events import (
     AgentEvent,
     EventSink,
@@ -106,6 +107,7 @@ class SessionActor:
         self._bundle: AgentBundle | None = None
         self._running = False
         self._delivery: Delivery | None = None
+        self._turn_cancel: CancelToken | None = None
         self._pending_approval: asyncio.Future[bool] | None = None
         # Built once with the agent, re-pointed at each turn's delivery.
         self._sink = SwitchableSink()
@@ -135,12 +137,16 @@ class SessionActor:
         return True
 
     def interrupt(self) -> bool:
-        """Ask the running turn to stop at its next checkpoint."""
-        bundle = self._bundle
-        if bundle is None or not self._running:
+        """Ask the running turn to stop at its next checkpoint.
+
+        Cancels the token this actor minted for the turn rather than reaching
+        into the runner for whichever token it happens to hold. The runner
+        installs the one it is given, so this reaches the turn even in the window
+        between the actor deciding to run and the loop actually starting.
+        """
+        if self._turn_cancel is None or not self._running:
             return False
-        bundle.runner.cancel.cancel("a newer message arrived")
-        bundle.context.cancel.cancel("a newer message arrived")
+        self._turn_cancel.cancel("a newer message arrived")
         self.stats.interruptions += 1
         return True
 
@@ -278,10 +284,16 @@ class SessionActor:
             self._sink.target = sink
 
             await delivery.typing()
+            # Minted before the turn is running, so a message arriving in the
+            # window between here and the loop's first checkpoint still stops it.
+            token = CancelToken()
+            self._turn_cancel = token
             self._running = True
             try:
                 session = _require_session(bundle)
-                result = await asyncio.to_thread(bundle.runner.run_turn, turn.text, session=session)
+                result = await asyncio.to_thread(
+                    bundle.runner.run_turn, turn.text, session=session, cancel=token
+                )
             except Exception as exc:
                 self.stats.errors += 1
                 self.stats.last_reason = "error"
@@ -291,6 +303,7 @@ class SessionActor:
             finally:
                 self._running = False
                 self._delivery = None
+                self._turn_cancel = None
                 # Anything the loop emits after this point -- a late tool
                 # progress line from a thread still winding down -- must not
                 # reach a delivery that has already been finished.

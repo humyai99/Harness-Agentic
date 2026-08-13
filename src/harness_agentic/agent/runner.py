@@ -188,10 +188,23 @@ class AgentRunner:
     # -- the loop -----------------------------------------------------------
 
     def run_turn(  # noqa: PLR0912, PLR0915  -- the loop is one readable state machine
-        self, user_input: str, *, session: SessionRecord
+        self, user_input: str, *, session: SessionRecord, cancel: CancelToken | None = None
     ) -> TurnResult:
-        """Run one user turn to completion."""
-        self.cancel = CancelToken()
+        """Run one user turn to completion.
+
+        ``cancel`` lets the caller own the token, which matters when the caller
+        can interrupt: a token created here is created *after* the caller decided
+        to stop the turn, so an interrupt racing the start of a turn would cancel
+        an object nothing goes on to check.
+
+        The token is also pushed onto the tool context, so the loop and the
+        commands it runs stop together. They were separate objects before, and a
+        conversation that had been interrupted once went on killing every command
+        it ran after that -- the loop got a fresh token each turn and the tools
+        kept the cancelled one forever.
+        """
+        self.cancel = cancel or CancelToken()
+        self._context.cancel = self.cancel
         self._emit(TurnStarted(session_id=session.id, model=self.current.label()))
 
         history = list(self._store.history(session.id))
