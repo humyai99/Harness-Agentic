@@ -164,11 +164,25 @@ class SqliteKnowledgeBase:
             self._connection = None
 
     def index(self, chunks: Iterable[Chunk]) -> int:
-        """Add or replace passages. Returns how many were written."""
+        """Replace every passage of the documents named. Returns how many were written.
+
+        Replaces the document, not just the passages that happen to collide.
+        Chunk ids are ``doc_id#ordinal``, so upserting alone left the tail of a
+        document that had grown shorter sitting in the index: delete a withdrawn
+        section, re-index, and the old text still comes back as an answer, with
+        nothing reporting a problem. That is the worst shape a retrieval bug can
+        take -- the corpus disagrees with the source and only the corpus is read.
+
+        Deleting and inserting share one transaction, so a crash midway leaves
+        the previous version intact rather than a half-indexed document.
+        """
         connection = self.connect()
         written = 0
+        batch = list(chunks)
         with connection:
-            for chunk in chunks:
+            for doc_id in dict.fromkeys(chunk.doc_id for chunk in batch):
+                connection.execute("DELETE FROM chunks WHERE doc_id = ?", (doc_id,))
+            for chunk in batch:
                 connection.execute(
                     "INSERT INTO chunks(id, doc_id, ordinal, heading, body, checksum) "
                     "VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
@@ -191,7 +205,12 @@ class SqliteKnowledgeBase:
         return self.index(chunk_document(text, doc_id=doc_id or path.name))
 
     def index_directory(self, root: Path, *, pattern: str = "**/*.md") -> int:
-        """Index every matching file under a directory."""
+        """Index every matching file under a directory.
+
+        Each file replaces its own document. A file *deleted* since the last run
+        is not noticed -- nothing here knows it used to exist -- so removing a
+        document from the corpus still means calling :meth:`forget`.
+        """
         return sum(
             self.index_file(path, doc_id=str(path.relative_to(root)))
             for path in sorted(root.glob(pattern))

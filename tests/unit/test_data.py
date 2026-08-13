@@ -330,6 +330,32 @@ def test_re_indexing_replaces_rather_than_duplicates(tmp_path: Path) -> None:
     kb.close()
 
 
+def test_text_deleted_from_a_document_stops_being_an_answer(tmp_path: Path) -> None:
+    """Re-indexing replaces the document, not just the passages that collide.
+
+    Chunk ids are ``doc_id#ordinal``, so an upsert alone left the tail of a
+    document that had grown shorter in the index. Withdraw a section, re-index,
+    and the removed text still came back as a current answer -- with the write
+    reporting success and the count quietly disagreeing with the source. For the
+    support bot this module is written for, that is answering a customer from a
+    policy somebody deliberately deleted.
+
+    The test above re-indexes an unchanged document, so the counts matched and
+    it never saw this.
+    """
+    kb = SqliteKnowledgeBase(path=tmp_path / "kb.db")
+    long_form = f"{DOC}\n\n## Legacy\n\n" + ("Returns are accepted at any retail store. " * 30)
+    kb.index(chunk_document(long_form, doc_id="policy.md"))
+    assert kb.search("retail store")
+
+    kb.index(chunk_document(DOC, doc_id="policy.md"))
+
+    assert kb.search("retail store") == []
+    assert kb.count() == len(chunk_document(DOC, doc_id="policy.md"))
+    assert kb.search("rollback"), "the surviving sections are still there"
+    kb.close()
+
+
 def test_forgetting_a_document_removes_it_from_search(tmp_path: Path) -> None:
     kb = SqliteKnowledgeBase(path=tmp_path / "kb.db")
     kb.index(chunk_document(DOC, doc_id="deploy.md"))
