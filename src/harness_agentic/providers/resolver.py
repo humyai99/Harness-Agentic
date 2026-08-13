@@ -110,6 +110,13 @@ class TransportResolver:
                 )
             case "gemini_generate":
                 return GeminiTransport(credentials=credentials, clock=self._clock)
+            case "fake":
+                # Imported here rather than at module scope: the testing package
+                # is for driving the stack without a provider, and nothing should
+                # pay to import it on a run that uses a real one.
+                from harness_agentic.testing.scenario import scripted_transport  # noqa: PLC0415
+
+                return scripted_transport(credentials, clock=self._clock)
             case _:
                 msg = f"no transport implements api_mode {info.api_mode!r}"
                 raise ProviderError(msg)

@@ -99,7 +99,9 @@ def register(app: typer.Typer) -> None:
         Exit code 0 when the turn completed, 1 otherwise -- so this composes in
         a shell pipeline or a CI step.
         """
-        bundle = _build(model, workspace, toolsets, stream, thinking, approve_all=yes, backend=env)
+        bundle, renderer = _build(
+            model, workspace, toolsets, stream, thinking, approve_all=yes, backend=env
+        )
         try:
             session = bundle.store.latest()
             if session is None:
@@ -111,6 +113,11 @@ def register(app: typer.Typer) -> None:
         except HarnessError as exc:
             err_console.print(f"[red]{exc}[/]")
             raise typer.Exit(1) from exc
+        if not renderer.wrote_answer and result.final_text.strip():
+            # Nothing streamed it. With --no-stream there are no text chunks at
+            # all, so this command printed a usage line and no answer -- in the
+            # mode its own docstring recommends for a pipeline or a CI step.
+            console.print(result.final_text, markup=False, highlight=False)
         console.print()
         raise typer.Exit(0 if result.exit_reason == "completed" else 1)
 
@@ -129,7 +136,9 @@ def register(app: typer.Typer) -> None:
         ),
     ) -> None:
         """Start an interactive session. Ctrl-D or /exit to leave."""
-        bundle = _build(model, workspace, toolsets, stream, thinking, approve_all=yes, backend=env)
+        bundle, renderer = _build(
+            model, workspace, toolsets, stream, thinking, approve_all=yes, backend=env
+        )
         session = bundle.store.latest()
         if session is None:
             err_console.print("[red]could not create a session[/]")
@@ -151,12 +160,16 @@ def register(app: typer.Typer) -> None:
             if text in ("/exit", "/quit"):
                 break
             _warn_if_secret(text)
+            renderer.wrote_answer = False
             try:
-                bundle.runner.run_turn(text, session=session)
+                turn = bundle.runner.run_turn(text, session=session)
             except KeyboardInterrupt:
                 break
             except HarnessError as exc:
                 err_console.print(f"[red]{exc}[/]")
+            else:
+                if not renderer.wrote_answer and turn.final_text.strip():
+                    console.print(turn.final_text, markup=False, highlight=False)
             console.print()
 
 
@@ -169,7 +182,7 @@ def _build(
     *,
     approve_all: bool,
     backend: str = "",
-) -> AgentBundle:
+) -> tuple[AgentBundle, ConsoleRenderer]:
     """Assemble the agent, reporting a missing credential as advice not a stack.
 
     Flags override configuration rather than replacing it. An empty flag means
@@ -204,15 +217,16 @@ def _build(
             "[yellow]--yes is on: every tool call runs without asking.[/] "
             "Only do this in a sandbox."
         )
+    renderer = ConsoleRenderer(show_thinking=thinking)
     try:
-        return build_agent(
+        bundle = build_agent(
             model=settings.model.default,
             workspace=workspace.resolve(),
             sessions_dir=profile / "sessions",
             toolsets=settings.enabled_toolsets(),
             fallbacks=settings.model.fallbacks,
             surface="cli",
-            emit=ConsoleRenderer(show_thinking=thinking),
+            emit=renderer,
             approval=policy,
             stream=stream and settings.model.stream,
             env=environment,
@@ -222,6 +236,7 @@ def _build(
     except CredentialError as exc:
         err_console.print(f"[red]{exc}[/]")
         sys.exit(1)
+    return bundle, renderer
 
 
 def _split(raw: str) -> list[str]:

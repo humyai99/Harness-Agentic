@@ -45,12 +45,21 @@ class ConsoleRenderer:
         self._show_thinking = show_thinking
         self._show_usage = show_usage
         self._streaming = False
+        self.wrote_answer = False
+        """Whether any answer text has been printed.
+
+        Read by ``harn run``, which otherwise cannot tell "the model said
+        nothing" from "the answer never came through this renderer". With
+        ``--no-stream`` there are no text chunks at all, and the command printed
+        a usage line and nothing else.
+        """
 
     def __call__(self, event: AgentEvent) -> None:  # noqa: PLR0912
         """Render one event. One branch per event kind."""
         match event:
             case TextChunk(text=text):
                 self._streaming = True
+                self.wrote_answer = True
                 console.print(text, end="", markup=False, highlight=False)
 
             case ThinkingChunk(text=text) if self._show_thinking:

@@ -165,6 +165,13 @@ def parse_frontmatter(raw: str) -> dict[str, Any]:  # noqa: PLR0912, PLR0915
             folded = _Folded()
             mapping[key] = folded
             stack.append(_Frame(indent=indent, node=folded, parent=mapping, key=key))
+        elif (flow := _flow_mapping(value)) is not None:
+            # `arguments: {path: a.txt}`. A list item already accepted the flow
+            # style; a mapping's value read it as the literal string "{path:
+            # a.txt}", so the same notation meant two different things depending
+            # on where it appeared -- and the failure is a value that looks right
+            # in the file and is a string by the time anything uses it.
+            mapping[key] = flow
         else:
             mapping[key] = _scalar(value)
 

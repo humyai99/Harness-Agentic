@@ -502,6 +502,15 @@ class AgentRunner:
         if not request.stream:
             response = transport.send(request, cancel=self.cancel)
             transport.validate_response(response)
+            # Emitted here too, not only on the streaming path. Every surface
+            # learns the answer from this event -- the CLI prints it, the
+            # gateway posts it, the web UI frames it, the voice front end speaks
+            # it -- so when only the streaming branch emitted, turning streaming
+            # off made all of them silent. The turn still succeeded and the
+            # transcript was still written, which is what made it invisible:
+            # nothing failed, the answer simply never arrived anywhere.
+            if answer := response.message.text():
+                self._emit(TextChunk(answer))
             return response
 
         started = time.monotonic()

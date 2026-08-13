@@ -59,6 +59,7 @@ class Harness:
         adapter: FakeAdapter | None = None,
         authorizer: Authorizer | None = None,
         limiter: RateLimiter | None = None,
+        stream: bool = True,
     ) -> None:
         self.adapter = adapter or FakeAdapter(capabilities=telegram_like())
         self.transport = FakeTransport(script)
@@ -79,6 +80,7 @@ class Harness:
                 # tests a refusal. Opened deliberately, per test harness.
                 approval=ApprovalPolicy(surface="gateway", modes={"gateway": Mode.ALLOW}),
                 transports={"fake": self.transport},
+                stream=stream,
             )
             self.bundles.append(bundle)
             return bundle
@@ -492,3 +494,21 @@ def _line_delivery(text: str) -> bytes:
             ],
         }
     ).encode()
+
+
+async def test_a_non_streaming_turn_still_reaches_the_platform(
+    workspace: Path, tmp_path: Path
+) -> None:
+    """`TextChunk` was emitted only on the streaming path.
+
+    Every surface learns the answer from that event, so `model.stream = false`
+    -- a setting an operator picks when an endpoint streams badly -- made the
+    gateway post nothing at all. The turn completed, the transcript was written,
+    the usage was recorded, and the user saw silence. Nothing failed, which is
+    why it could sit there.
+    """
+    harness = Harness(workspace, tmp_path, [text_turn("staging is deployed")], stream=False)
+    await harness.send("deploy staging")
+    await harness.aclose()
+
+    assert "staging is deployed" in harness.adapter.transcript()
