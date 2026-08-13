@@ -15,7 +15,7 @@ import pytest
 from pydantic import BaseModel, Field
 
 from harness_agentic.core.cancel import CancelToken
-from harness_agentic.core.types import ToolResultBlock, ToolUseBlock
+from harness_agentic.core.types import ToolUseBlock
 from harness_agentic.envs.local import LocalEnvironment
 from harness_agentic.errors import PathOutsideWorkspace
 from harness_agentic.tools.approval import (
@@ -429,32 +429,33 @@ def test_a_read_before_a_write_sees_the_file_before_the_write(
     assert target.read_text(encoding="utf-8") == "VERSION = 'rewritten'\n"
 
 
-def test_consecutive_reads_still_share_one_batch(
-    builtins: ToolRegistry, ctx: _Ctx, tmp_path: Path
-) -> None:
-    # Ordering is restored by making a write a barrier, not by giving up
-    # concurrency: a run of reads is still one parallel batch.
-    for name in ("a.txt", "b.txt", "c.txt"):
-        (tmp_path / name).write_text(name, encoding="utf-8")
-    executor = ToolExecutor(builtins, approval=always_allow(), max_parallel=3)
-    threads: set[str] = set()
+def test_consecutive_safe_calls_still_run_concurrently(ctx: _Ctx) -> None:
+    """Ordering was restored by making a write a barrier, not by serializing.
 
-    original = executor.execute
+    Asserted with a real barrier rather than by counting thread names: a pool
+    reuses an idle worker instead of spawning a new one, so three calls that
+    finish quickly can legitimately share one thread. The property that matters
+    is that they *can* overlap, and a barrier is the only thing that says so
+    without a sleep.
+    """
+    gate = threading.Barrier(3, timeout=5)
+    reg = ToolRegistry()
 
-    def watched(call: ToolUseBlock, context: ToolContext) -> ToolResultBlock:
-        threads.add(threading.current_thread().name)
-        return original(call, context)
+    @reg.tool(toolset="demo", danger=Danger.SAFE)
+    def waits(params: _Params, ctx: ToolContext) -> ToolResult:
+        """Return only once all three calls have arrived."""
+        gate.wait()
+        return ToolResult(text="together")
 
-    executor.execute = watched  # type: ignore[method-assign]
-    executor.execute_batch(
-        [
-            ToolUseBlock(id=f"c{i}", name="read_file", arguments={"path": name})
-            for i, name in enumerate(("a.txt", "b.txt", "c.txt"))
-        ],
+    executor = ToolExecutor(reg, approval=always_allow(), max_parallel=3)
+    results = executor.execute_batch(
+        [ToolUseBlock(id=f"c{i}", name="waits", arguments={"value": i}) for i in range(3)],
         ctx,  # type: ignore[arg-type]
     )
 
-    assert len(threads) > 1, "three reads in a row ran one after another"
+    # Serialized, the first call would sit at the barrier until it timed out.
+    assert [r.text for r in results] == ["together"] * 3
+    assert not any(r.is_error for r in results)
 
 
 # -- builtin file tools --------------------------------------------------------
