@@ -86,7 +86,7 @@ def split_frontmatter(raw: str) -> tuple[str, str]:
     raise SkillValidationError(msg)
 
 
-def parse_frontmatter(raw: str) -> dict[str, Any]:  # noqa: PLR0912, PLR0915
+def parse_frontmatter(raw: str) -> dict[str, Any]:
     """Parse the subset of YAML a skill's frontmatter is allowed to use.
 
     Scalars, block and inline lists, nested maps by indentation, and folded or
@@ -138,11 +138,19 @@ def parse_frontmatter(raw: str) -> dict[str, Any]:  # noqa: PLR0912, PLR0915
             if ":" in item and not _is_quoted(item):
                 child: dict[str, Any] = {}
                 container.append(child)
-                key, _, value = item.partition(":")
-                child[key.strip()] = _scalar(value.strip())
                 # The frame's indent is the marker's own, so continuation
                 # lines stay inside the item while the next `- ` pops it.
+                # Pushed before the value is assigned, so that a block scalar's
+                # frame lands on top of this one rather than under it.
                 stack.append(_Frame(indent=indent, node=child, parent=None, key=None))
+                key, _, value = item.partition(":")
+                # Through the same assignment as a plain mapping. This branch
+                # used to call ``_scalar`` directly, so a value that continues
+                # below -- `- text: >` -- stored the marker ">" as a string and
+                # the prose beneath it was then read as structure and rejected.
+                # A list of mappings is where a scenario and a skill's test cases
+                # both live, so it was the one place the block form was needed.
+                _assign(child, key.strip(), value.strip(), indent=indent + _MARKER, stack=stack)
             else:
                 container.append(_scalar(item))
             continue
@@ -153,30 +161,44 @@ def parse_frontmatter(raw: str) -> dict[str, Any]:  # noqa: PLR0912, PLR0915
 
         mapping = frame.become(dict)
         key, _, value = stripped.partition(":")
-        key, value = key.strip(), value.strip()
-
-        if not value:
-            mapping[key] = None
-            stack.append(_Frame(indent=indent, node=None, parent=mapping, key=key))
-        elif value.startswith("[") and value.endswith("]"):
-            inner = value[1:-1].strip()
-            mapping[key] = [_scalar(p.strip()) for p in inner.split(",") if p.strip()]
-        elif value in (">", "|", ">-", "|-"):
-            folded = _Folded()
-            mapping[key] = folded
-            stack.append(_Frame(indent=indent, node=folded, parent=mapping, key=key))
-        elif (flow := _flow_mapping(value)) is not None:
-            # `arguments: {path: a.txt}`. A list item already accepted the flow
-            # style; a mapping's value read it as the literal string "{path:
-            # a.txt}", so the same notation meant two different things depending
-            # on where it appeared -- and the failure is a value that looks right
-            # in the file and is a string by the time anything uses it.
-            mapping[key] = flow
-        else:
-            mapping[key] = _scalar(value)
+        _assign(mapping, key.strip(), value.strip(), indent=indent, stack=stack)
 
     finalized = _finalize(root)
     return finalized if isinstance(finalized, dict) else {}
+
+
+_MARKER = 2
+"""Width of a list item's ``- ``. A key inside one starts that far in."""
+
+
+def _assign(
+    mapping: dict[str, Any], key: str, value: str, *, indent: int, stack: list[_Frame]
+) -> None:
+    """Store one ``key: value``, pushing a frame when the value continues below.
+
+    Shared by plain mappings and by mappings that are list items, because the
+    two branches drifted: the list one handled only scalars, so the same
+    notation meant different things depending on where it sat.
+    """
+    if not value:
+        mapping[key] = None
+        stack.append(_Frame(indent=indent, node=None, parent=mapping, key=key))
+    elif value.startswith("[") and value.endswith("]"):
+        inner = value[1:-1].strip()
+        mapping[key] = [_scalar(p.strip()) for p in inner.split(",") if p.strip()]
+    elif value in (">", "|", ">-", "|-"):
+        folded = _Folded()
+        mapping[key] = folded
+        stack.append(_Frame(indent=indent, node=folded, parent=mapping, key=key))
+    elif (flow := _flow_mapping(value)) is not None:
+        # `arguments: {path: a.txt}`. A list item already accepted the flow
+        # style; a mapping's value read it as the literal string, so the same
+        # notation meant two different things depending on where it appeared --
+        # and the failure is a value that looks right in the file and is a
+        # string by the time anything uses it.
+        mapping[key] = flow
+    else:
+        mapping[key] = _scalar(value)
 
 
 @dataclass

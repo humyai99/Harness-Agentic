@@ -5,8 +5,9 @@ registry-based tool system, skills the agent writes and revises from its own
 experience, and a chat gateway that serves several messaging platforms from one
 process.
 
-> Status: early. M0 (scaffold and toolchain) is in place. See
-> `docs/architecture.md` for the design and the milestone plan.
+> Status: in development. The agent loop, tools, sessions, memory, skills, the
+> chat gateway, MCP, the browser toolset, the web UI and voice are implemented.
+> See `docs/architecture.md` for the design and the milestone plan.
 
 ## Quick start
 
@@ -15,6 +16,48 @@ uv sync --all-extras --dev
 uv run harn --version
 uv run harn doctor
 ```
+
+## Try it without an API key
+
+`fake/scripted` is a real provider that replays a scenario file, so the whole
+stack runs with no credential, no network and no bill. Everything except the
+model is real: real tool dispatch against the real filesystem, real approval
+policy, real session store, real prompt assembly with real cache breakpoints.
+
+```bash
+export HARNESS_HOME=/tmp/harn-demo            # keep it out of ~/.harness
+export HARNESS_FAKE_SCRIPT=examples/tour.yaml
+
+uv run harn run -m fake/scripted --toolsets file,memory --yes \
+  "have a look around this project"
+```
+
+```
+Let me see what this project is.
+  > read_file: pyproject.toml     ✓
+  > grep_files: src/harness_agentic/memory     ✓
+  > memory_add     ✓
+This is harness-agentic, a Python agent framework...
+4 step(s)  in 23865  out 68
+```
+
+`--yes` approves every tool call and belongs only in a sandbox; without it the
+`terminal` tool is refused on any surface with nobody to ask. Then look at what
+the run left behind:
+
+```bash
+uv run harn memory show        # the fact it recorded, and what it costs per turn
+uv run harn sessions           # the transcript, searchable with FTS5
+uv run harn skills list        # the catalog, and its token cost
+uv run harn tools              # every tool an agent would be offered
+```
+
+Write your own scenario by copying `examples/tour.yaml`: each entry under
+`turns:` is one model response, `tool:` calls a tool and `text:` answers.
+
+With a real key instead, `harn auth set anthropic` reads it from a hidden prompt
+and writes it to `.env` at mode 0600 — never pass a credential as an argument,
+where it lands in shell history and in `ps`.
 
 ## Design in one page
 

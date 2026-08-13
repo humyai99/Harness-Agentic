@@ -747,3 +747,33 @@ def test_execution_cases_without_a_sandbox_are_skipped_not_passed(
     assert report.skipped
     assert report.results[0].outcome is Outcome.SKIPPED
     assert "skipped (status unknown)" in report.summary()
+
+
+def test_a_list_item_takes_the_same_value_forms_a_mapping_does() -> None:
+    """The two branches had drifted, so notation meant different things by place.
+
+    A list item handled only scalars: `- text: >` stored the marker ">" as a
+    string and the prose beneath it was then read as structure and rejected,
+    and `arguments: {path: a}` inside an item stayed a string that looked
+    correct in the file. A list of mappings is exactly where a skill's test
+    cases and a scripted scenario live, so it was the one place the block and
+    flow forms were needed.
+    """
+    parsed = parse_frontmatter(
+        "turns:\n"
+        "  - text: >\n"
+        "      folded prose across\n"
+        "      two lines\n"
+        "    tool: read_file\n"
+        "    arguments: {path: a.txt}\n"
+        "    tags: [one, two]\n"
+        "  - text: plain\n"
+    )
+
+    first, second = parsed["turns"]
+    assert first["text"] == "folded prose across two lines"
+    # The sibling keys after the block still belong to the item, not to the block.
+    assert first["tool"] == "read_file"
+    assert first["arguments"] == {"path": "a.txt"}
+    assert first["tags"] == ["one", "two"]
+    assert second == {"text": "plain"}
