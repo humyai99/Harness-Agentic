@@ -106,7 +106,7 @@ class ToolExecutor:
                 call,
                 ToolResult.error(f"{tool.name} is unavailable ({missing})"),
                 started,
-                arguments=parsed.model_dump(),
+                arguments=_recorded(parsed),
             )
 
         decision = self._approval.check(
@@ -122,7 +122,7 @@ class ToolExecutor:
                 call,
                 ToolResult.error(f"Not permitted: {decision.reason}"),
                 started,
-                arguments=parsed.model_dump(),
+                arguments=_recorded(parsed),
             )
 
         try:
@@ -130,8 +130,7 @@ class ToolExecutor:
         except Exception as exc:  # a handler must never end the turn
             result = ToolResult.error(f"{tool.name} failed: {type(exc).__name__}: {exc}")
 
-        recorded = parsed if isinstance(parsed, dict) else parsed.model_dump()
-        return self._finish(call, self._bound(result, tool), started, arguments=recorded)
+        return self._finish(call, self._bound(result, tool), started, arguments=_recorded(parsed))
 
     def _parse_arguments(self, tool: Tool, call: ToolUseBlock) -> Any:
         """Validate arguments, or return the error the model should see."""
@@ -259,6 +258,23 @@ class ToolExecutor:
         run_batch()
 
         return [r for r in results if r is not None]
+
+
+def _recorded(parsed: Any) -> dict[str, Any]:
+    """Validated arguments as a plain mapping, for the trace and the store.
+
+    A tool whose schema belongs to a remote MCP server has no local model, so
+    ``validate_arguments`` hands back the raw mapping. Only the success path
+    allowed for that; the refusal and unavailable paths called ``model_dump``
+    unconditionally and raised ``AttributeError`` on a dict -- which broke the
+    one rule this module has, that a tool can never kill a turn. And it broke it
+    on the *refusal* path, which for a bridged tool is the ordinary case: MCP
+    tools are NETWORK by default, so they need approval on almost every surface.
+    """
+    if isinstance(parsed, dict):
+        return dict(parsed)
+    dumped: dict[str, Any] = parsed.model_dump()
+    return dumped
 
 
 def _summarize(tool: Tool, call: ToolUseBlock) -> str:

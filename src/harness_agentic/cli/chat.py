@@ -24,11 +24,13 @@ from harness_agentic.cli.render import console, err_console
 from harness_agentic.config import ConfigError, Settings, load_settings
 from harness_agentic.constants import ensure_dirs
 from harness_agentic.errors import CredentialError, HarnessError
+from harness_agentic.mcp.config import McpConfigError, configured_servers
 from harness_agentic.tools.approval import ApprovalPolicy, Mode
 from harness_agentic.tools.paths import looks_like_secret
 
 if TYPE_CHECKING:
     from harness_agentic.envs.base import ExecEnvironment
+    from harness_agentic.mcp.stdio import ServerConfig
 
 if TYPE_CHECKING:
     from types import FrameType
@@ -246,12 +248,29 @@ def _build(
             stream=stream and settings.model.stream,
             env=environment,
             memory=memory_store(settings),
+            mcp_servers=_mcp_servers(),
             max_iterations=settings.model.max_iterations,
         )
     except CredentialError as exc:
         err_console.print(f"[red]{exc}[/]")
         sys.exit(1)
     return bundle, renderer
+
+
+def _mcp_servers() -> list[ServerConfig]:
+    """The MCP servers an agent started here should connect to.
+
+    Nothing passed these before, so `harn mcp check` could start a server and
+    list its tools while every agent ran without them -- the tools existed and
+    were unreachable. A broken entry is reported and skipped rather than
+    stopping the session: one bad server should not cost the operator their
+    agent, and `harn mcp check` is where the details belong.
+    """
+    try:
+        return configured_servers()
+    except McpConfigError as exc:
+        err_console.print(f"[yellow]ignoring MCP configuration:[/] {exc}")
+        return []
 
 
 def _split(raw: str) -> list[str]:

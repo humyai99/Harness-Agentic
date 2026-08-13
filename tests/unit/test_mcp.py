@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from harness_agentic.core.types import ToolUseBlock
 from harness_agentic.mcp.bridge import (
     MCP_FLOOR,
     McpBridge,
@@ -32,8 +33,10 @@ from harness_agentic.mcp.protocol import (
     parse_tool_list,
 )
 from harness_agentic.mcp.stdio import McpError, ServerConfig, StdioServer, load_servers
+from harness_agentic.tools.approval import always_deny
+from harness_agentic.tools.dispatch import ToolExecutor
 from harness_agentic.tools.registry import ToolRegistry
-from harness_agentic.tools.spec import Danger
+from harness_agentic.tools.spec import Danger, Tool, ToolResult
 
 # -- protocol ---------------------------------------------------------------------
 
@@ -499,3 +502,51 @@ def test_a_disabled_server_is_not_started() -> None:
     bridge = McpBridge(registry=ToolRegistry())
     assert bridge.connect(ServerConfig(name="off", command=("x",), enabled=False)) is None
     assert bridge.failures == {}
+
+
+def test_a_refused_bridged_tool_does_not_kill_the_turn() -> None:
+    """The one rule this dispatcher has, broken on the ordinary path.
+
+    A tool whose schema belongs to a remote server has no local model, so
+    validation hands back the raw mapping. Only the success path allowed for
+    that: the refusal and unavailable paths called ``model_dump()`` on it and
+    raised ``AttributeError``, which escaped as a crash instead of becoming a
+    tool error the model could read.
+
+    And it broke on *refusal*, which for a bridged tool is the common case --
+    MCP tools are NETWORK by default, so they need approval on almost every
+    surface. The happy path worked, so nothing noticed.
+    """
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="remote__add",
+            description="Add two numbers on a remote server.",
+            toolset="mcp:remote",
+            params_model=None,
+            raw_schema={"type": "object", "properties": {"a": {"type": "number"}}},
+            handler=lambda params, ctx: ToolResult(text="never reached"),
+            danger=Danger.NETWORK,
+        )
+    )
+    executor = ToolExecutor(registry, approval=always_deny())
+
+    result = executor.execute(
+        ToolUseBlock(id="c1", name="remote__add", arguments={"a": 1}),
+        _StubContext(),  # type: ignore[arg-type]
+    )
+
+    assert result.is_error
+    assert "Not permitted" in result.text
+    # The arguments still reach the trace, as a plain mapping.
+    assert executor.records[-1].arguments == {"a": 1}
+
+
+class _StubContext:
+    """Enough of a ToolContext for a call that is refused before it runs."""
+
+    session_id = "s1"
+    surface = "cli"
+
+    def emit(self, message: str) -> None:
+        del message

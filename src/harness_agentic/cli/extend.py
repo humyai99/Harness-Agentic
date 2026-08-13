@@ -16,6 +16,7 @@ from __future__ import annotations
 import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 from rich.markup import escape
@@ -28,9 +29,12 @@ from harness_agentic.constants import harness_home
 from harness_agentic.cron.runner import CronRunner, Job, load_jobs
 from harness_agentic.cron.schedule import BadSchedule, parse
 from harness_agentic.mcp.bridge import McpBridge
-from harness_agentic.mcp.stdio import ServerConfig, load_servers
+from harness_agentic.mcp.config import McpConfigError, config_path, configured_servers
 from harness_agentic.plugins.loader import discover, load
 from harness_agentic.tools.builtin import builtin_registry
+
+if TYPE_CHECKING:
+    from harness_agentic.mcp.stdio import ServerConfig
 
 JOBS_FILENAME = "cron.toml"
 
@@ -280,22 +284,17 @@ def register_mcp(app: typer.Typer) -> None:
 
 def _mcp_path(explicit: Path | None) -> Path:
     """Where MCP server configuration is read from."""
-    return explicit or (harness_home() / "mcp.toml")
+    return config_path(explicit)
 
 
 def _servers(explicit: Path | None) -> list[ServerConfig]:
-    """Read server configs from TOML, refusing anything malformed."""
-    path = _mcp_path(explicit)
-    if not path.exists():
-        return []
-    raw = tomllib.loads(path.read_text(encoding="utf-8"))
-    section = raw.get("mcp") or raw
-    entries = section.get("servers") or []
-    if not isinstance(entries, list):
-        console.print(f"[red]{path} should contain a list of {escape('[[mcp.servers]]')} tables[/]")
-        raise typer.Exit(code=1)
+    """Read server configs, refusing anything malformed.
+
+    Shared with the agent builder rather than kept here: this command reporting
+    servers that no agent could reach was the shape of the bug.
+    """
     try:
-        return load_servers(entries)
-    except (TypeError, ValueError) as exc:
-        console.print(f"[red]{path}: {exc}[/]")
+        return configured_servers(explicit)
+    except McpConfigError as exc:
+        console.print(f"[red]{exc}[/]")
         raise typer.Exit(code=1) from exc
