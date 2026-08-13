@@ -208,6 +208,23 @@ def tool_guidance_fragment(tools: Sequence[ToolSchema]) -> PromptFragment:
     )
 
 
+def memory_fragment(remembered: str) -> PromptFragment:
+    """Facts carried over from earlier sessions.
+
+    ``KNOWLEDGE``, beside the skills catalog, and a frozen snapshot for the same
+    reason: this block is in the prompt on every turn, so it has to be
+    byte-identical on every turn or the cached prefix is thrown away. A fact
+    recorded mid-session therefore lands on disk now and joins the prompt next
+    session, which ``memory_add`` says in its answer rather than leaving the
+    model to notice.
+
+    Ordered before the catalog because it is smaller and changes less often: the
+    most stable content sits earliest, so an edit invalidates as little of the
+    prefix as possible.
+    """
+    return PromptFragment(key="memory", tier=Tier.KNOWLEDGE, text=remembered, order=5)
+
+
 def skills_fragment(catalog: str) -> PromptFragment:
     """The level-0 skills catalog: names and descriptions, nothing more.
 

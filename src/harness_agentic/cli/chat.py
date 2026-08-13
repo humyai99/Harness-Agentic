@@ -19,6 +19,7 @@ import typer
 
 from harness_agentic.agent.build import AgentBundle, build_agent
 from harness_agentic.cli.events import ConsoleRenderer
+from harness_agentic.cli.memory import memory_store
 from harness_agentic.cli.render import console, err_console
 from harness_agentic.config import ConfigError, Settings, load_settings
 from harness_agentic.constants import ensure_dirs
@@ -215,6 +216,7 @@ def _build(
             approval=policy,
             stream=stream and settings.model.stream,
             env=environment,
+            memory=memory_store(settings),
             max_iterations=settings.model.max_iterations,
         )
     except CredentialError as exc:

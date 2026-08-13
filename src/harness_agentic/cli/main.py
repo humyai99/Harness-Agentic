@@ -14,6 +14,7 @@ from harness_agentic.cli import config as config_commands
 from harness_agentic.cli import extend as extend_commands
 from harness_agentic.cli import gateway as gateway_commands
 from harness_agentic.cli import inspect as inspect_commands
+from harness_agentic.cli import memory as memory_commands
 from harness_agentic.cli import skills as skills_commands
 from harness_agentic.cli import surfaces as surface_commands
 from harness_agentic.cli.render import console
@@ -54,6 +55,7 @@ inspect_commands.register_doctor(app)
 gateway_commands.register(app)
 extend_commands.register(app)
 skills_commands.register(app)
+memory_commands.register(app)
 surface_commands.register(app)
 
 

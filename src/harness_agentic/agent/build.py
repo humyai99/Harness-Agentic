@@ -19,7 +19,7 @@ from harness_agentic.agent.delegate import (
     install_delegate_tool,
 )
 from harness_agentic.agent.runner import AgentRunner, ModelChoice
-from harness_agentic.constants import harness_home
+from harness_agentic.constants import harness_home, memories_dir
 from harness_agentic.core.cancel import CancelToken
 from harness_agentic.core.clock import Clock, SystemClock
 from harness_agentic.core.events import EventSink, Notice, ToolProgress, null_sink
@@ -32,11 +32,13 @@ from harness_agentic.memory.compactor import (
     ContextCompactor,
     transcript_for_summary,
 )
+from harness_agentic.memory.manager import MemoryStore
 from harness_agentic.net.fetch import HttpFetcher
 from harness_agentic.net.search import from_environment
 from harness_agentic.prompts.builder import (
     PromptBuilder,
     identity_fragment,
+    memory_fragment,
     skills_fragment,
     tool_guidance_fragment,
     volatile_fragment,
@@ -55,6 +57,7 @@ from harness_agentic.tools.builtin.data import (
     install_kb_tools,
     install_sql_tools,
 )
+from harness_agentic.tools.builtin.memory import install_memory_tools
 from harness_agentic.tools.builtin.session import install_session_tools
 from harness_agentic.tools.builtin.skills import install_skill_tools
 from harness_agentic.tools.builtin.web import install_web_tools
@@ -156,7 +159,7 @@ def default_library(workspace: Path) -> SkillRegistry:
     )
 
 
-def build_agent(  # noqa: PLR0915 - one wiring site; splitting it spreads the wiring
+def build_agent(  # noqa: PLR0912, PLR0915 - one wiring site; splitting spreads the wiring
     *,
     model: str,
     workspace: Path,
@@ -172,6 +175,7 @@ def build_agent(  # noqa: PLR0915 - one wiring site; splitting it spreads the wi
     browser: Driver | None = None,
     skills: SkillRegistry | None = None,
     proposal_store: ProposalStore | None = None,
+    memory: MemoryStore | None = None,
     env: ExecEnvironment | None = None,
     surface: str = "cli",
     emit: EventSink = null_sink,
@@ -239,6 +243,17 @@ def build_agent(  # noqa: PLR0915 - one wiring site; splitting it spreads the wi
 
     def session_is_tainted() -> bool:
         return bool(executor_slot and executor_slot[0].tainted)
+
+    remembered = ""
+    if "memory" in toolsets:
+        # Defaults to a directory shared by every session in the profile, rather
+        # than a per-session one: memory that does not outlive the session is not
+        # memory. Profiles stay separate, though -- that is what they are for.
+        store_of_facts = memory if memory is not None else MemoryStore(memories_dir())
+        install_memory_tools(tool_registry, store_of_facts)
+        # Read once, here. Re-reading per turn would change the block mid-session
+        # and throw away the cached prefix for every remaining turn.
+        remembered = store_of_facts.snapshot()
 
     skill_library: SkillRegistry | None = None
     if "skill" in toolsets:
@@ -328,6 +343,8 @@ def build_agent(  # noqa: PLR0915 - one wiring site; splitting it spreads the wi
             volatile_fragment(now=the_clock.now().isoformat(timespec="seconds"), cwd=str(workspace))
         )
     )
+    if remembered:
+        prompts.add(memory_fragment(remembered))
     if skill_library is not None:
         # A frozen snapshot: taken once here and never regenerated, so it stays
         # byte-identical inside the cached prefix for the life of the session.

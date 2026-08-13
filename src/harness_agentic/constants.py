@@ -46,6 +46,18 @@ def profile_dir(profile: str | None = None) -> Path:
     return harness_home() / "profiles" / (profile or active_profile())
 
 
+def memories_dir(profile: str | None = None) -> Path:
+    """Return where durable memory files live.
+
+    Per profile rather than per home, for the same reason sessions are: a work
+    profile and a personal one exist precisely so that what one knows does not
+    turn up in the other's prompt. Defined here so the agent and ``harn memory``
+    cannot drift onto different directories and each report the other's file
+    as empty.
+    """
+    return profile_dir(profile) / "memories"
+
+
 def ensure_dirs(profile: str | None = None) -> Path:
     """Create the profile directory tree if missing and return the profile dir.
 

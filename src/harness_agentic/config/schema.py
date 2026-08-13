@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 # Not deferred: pydantic resolves field annotations at runtime, so a
 # TYPE_CHECKING import would make this model fail to build.
+from harness_agentic.memory.manager import MEMORY_LIMIT, USER_LIMIT
 from harness_agentic.tools.approval import Mode  # noqa: TC001
 
 STRICT = ConfigDict(extra="forbid")
@@ -92,6 +93,18 @@ class SkillSettings(BaseModel):
     external_dirs: tuple[str, ...] = ()
 
 
+class MemorySettings(BaseModel):
+    """Facts carried between sessions, and what they are allowed to cost."""
+
+    model_config = STRICT
+
+    enabled: bool = True
+    memory_limit: int = Field(MEMORY_LIMIT, gt=0)
+    """Characters in ``MEMORY.md``. Configurable, but raising it is not free: this
+    text is in the prompt on every turn of every session from now on."""
+    user_limit: int = Field(USER_LIMIT, gt=0)
+
+
 class GatewaySettings(BaseModel):
     """Chat platforms, and who is allowed to talk to them."""
 
@@ -115,6 +128,7 @@ class Settings(BaseModel):
     approval: ApprovalSettings = Field(default_factory=ApprovalSettings)
     docker: DockerSettings = Field(default_factory=DockerSettings)
     skills: SkillSettings = Field(default_factory=SkillSettings)
+    memory: MemorySettings = Field(default_factory=MemorySettings)
     gateway: GatewaySettings = Field(default_factory=GatewaySettings)
 
     def enabled_toolsets(self) -> list[str]:

@@ -87,6 +87,13 @@ def install_builtins(target: ToolRegistry | None = None) -> ToolRegistry:
     )
     reg.define_toolset(
         Toolset(
+            name="memory",
+            description="Remember facts across sessions. Bounded, and always in context.",
+            tools=("memory_add", "memory_replace", "memory_remove", "memory_list"),
+        )
+    )
+    reg.define_toolset(
+        Toolset(
             name="skill",
             description="Look up and follow written procedures, and propose new ones.",
             tools=("skill_search", "skill_load", "skill_read", "skill_propose"),
