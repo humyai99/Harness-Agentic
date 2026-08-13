@@ -168,6 +168,58 @@ def test_renaming_a_credential_column_is_refused(database: Path) -> None:
         source.query("SELECT group_concat(password_hash) AS blob FROM users")
 
 
+def test_the_as_keyword_is_optional_and_dropping_it_does_not_help(database: Path) -> None:
+    """The rename guard looked for ``AS``. The keyword is optional everywhere.
+
+    ``SELECT password_hash AS notes`` was refused and ``SELECT password_hash
+    notes`` -- the same rename with one word deleted -- returned the hash in
+    full: to the model, into the transcript, into the session store, and into
+    anything later distilled from them. A quoted alias went the same way. The
+    guard looking like it worked is what made this worth finding.
+    """
+    source = SqliteSource(path=database)
+
+    for statement in (
+        "SELECT password_hash notes FROM users",
+        'SELECT password_hash "notes" FROM users',
+        "SELECT api_key k FROM users",
+        "SELECT u.password_hash p FROM users u",
+        "SELECT lower(password_hash) q FROM users",
+        "select PASSWORD_HASH NoTeS from users",
+        "SELECT x FROM (SELECT password_hash x FROM users)",
+    ):
+        with pytest.raises(NotReadOnly, match="may not be renamed"):
+            source.query(statement)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "SELECT count(*) n FROM users",
+        "SELECT display_name AS byline FROM users",
+        "SELECT DISTINCT display_name FROM users",
+        "SELECT CAST(id AS TEXT) AS sid FROM users",
+        "SELECT id, email FROM users ORDER BY email LIMIT 5",
+        "WITH recent AS (SELECT id, email FROM users) SELECT email FROM recent",
+    ],
+)
+def test_an_ordinary_alias_is_not_mistaken_for_a_rename(statement: str, database: Path) -> None:
+    """A guard that refuses `count(*) n` is a guard somebody switches off.
+
+    The table alias in `FROM users u` is the one most easily confused with a
+    column rename, and `CAST(x AS text)` puts the keyword inside an expression.
+    """
+    SqliteSource(path=database).query(statement)
+
+
+def test_a_table_alias_does_not_hide_a_sensitive_column(database: Path) -> None:
+    # `FROM users u` renames the table, not the column -- the value still comes
+    # back as password_hash, so it is masked rather than refused.
+    rows = SqliteSource(path=database).query("SELECT u.password_hash FROM users u")
+    assert rows.masked == ("password_hash",)
+    assert all("redacted" in cell for row in rows.rows for cell in row)
+
+
 def test_renaming_to_another_sensitive_name_is_allowed_and_still_masked(
     database: Path,
 ) -> None:

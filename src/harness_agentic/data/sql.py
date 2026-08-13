@@ -184,59 +184,118 @@ def assert_read_only(sql: str) -> str:
 def aliased_secret(statement: str) -> tuple[str, str] | None:
     """A sensitive column renamed to something innocuous, if the statement does that.
 
-    Masking keys on the name a column *comes back* under, and an alias is exactly
-    the thing that controls that name -- so ``SELECT password_hash AS notes``
-    returned the hash in full while ``SELECT password_hash`` returned a marker.
-    The values are what must never reach a transcript, so a rename has to be
-    refused rather than trusted.
+    Masking keys on the name a column *comes back* under, and an alias is
+    exactly the thing that controls that name -- so ``SELECT password_hash AS
+    notes`` returns the hash in full while ``SELECT password_hash`` returns a
+    marker. The values are what must never reach a transcript, so a rename has
+    to be refused rather than trusted.
+
+    Works on select *items* rather than on the ``AS`` keyword, because the
+    keyword is optional in every dialect this targets. Checking for ``as``
+    caught ``SELECT password_hash AS notes`` and missed ``SELECT password_hash
+    notes``, which is the same rename with one word deleted and returned the
+    hash in full -- into the model, the transcript, the session store, and
+    anything later distilled from them. A quoted alias, ``password_hash
+    "notes"``, went the same way.
 
     Refused rather than masked-anyway: which output column a renamed expression
     corresponds to is exactly what cannot be determined without parsing the
     dialect, and a query answered with everything masked teaches the model that
     the data is empty. Refusing says what to do instead.
-
-    Expression forms are covered by walking back from a closing parenthesis to
-    its match, so ``substr(password,1,3) AS notes`` is caught too. Unaliased
-    expressions need no special handling: the driver names those columns after
-    the expression text, so ``password`` appears in the name and the ordinary
-    masking already applies.
     """
-    tokens = _TOKEN.findall(statement)
-    lowered = [word.lower() for word in tokens]
-    for index, word in enumerate(lowered):
-        if word != "as" or index == 0 or index + 1 >= len(tokens):
+    for item in _select_items(_TOKEN.findall(statement)):
+        alias = _alias_of(item)
+        if alias is None or is_sensitive(alias):
+            # No rename, or renamed to something ordinary masking still catches.
             continue
-        alias = tokens[index + 1]
-        if is_sensitive(alias):
-            continue  # renamed to something the ordinary masking still catches
-        if index >= _BEFORE_THE_SOURCE and lowered[index - _BEFORE_THE_SOURCE] in _RENAMES_A_TABLE:
-            continue
-        for candidate in _renamed_tokens(tokens, index):
-            column = candidate.rsplit(".", 1)[-1]
-            if is_sensitive(column):
+        for word in item[:-1]:
+            column = word.rsplit(".", 1)[-1]
+            if _is_name(word) and is_sensitive(column):
                 return column, alias
     return None
 
 
-def _renamed_tokens(tokens: Sequence[str], index: int) -> list[str]:
-    """The tokens of the select item that the ``AS`` at ``index`` renames.
+def _select_items(tokens: Sequence[str]) -> list[list[str]]:
+    """Every comma-separated item of every select list in the statement.
 
-    One identifier normally. For an expression the closing parenthesis is walked
-    back to its match so the arguments are examined, which is what makes
-    ``lower(substr(password,1,3)) AS notes`` visible rather than a bare ``)``.
+    Scoped to select lists so that ``FROM users u`` -- a table alias, whose
+    columns still arrive under their own names -- is never mistaken for a
+    column rename. Subqueries and CTEs get their own lists, which is where a
+    rename would otherwise hide.
     """
-    end = index - 1
-    if tokens[end] != ")":
-        return [tokens[end]]
+    items: list[list[str]] = []
+    index = 0
+    while index < len(tokens):
+        if tokens[index].lower() != "select":
+            index += 1
+            continue
+        index += 1
+        depth = 0
+        current: list[str] = []
+        while index < len(tokens):
+            word = tokens[index]
+            lowered = word.lower()
+            if word == "(":
+                depth += 1
+            elif word == ")":
+                if depth == 0:
+                    break  # the subquery this select sits in has closed
+                depth -= 1
+            elif depth == 0 and lowered in _ENDS_A_SELECT_LIST:
+                break
+            elif depth == 0 and lowered == "select":
+                break  # a nested select; the outer loop will pick it up
+            elif depth == 0 and word == ",":
+                items.append(current)
+                current = []
+                index += 1
+                continue
+            current.append(word)
+            index += 1
+        items.append(current)
+    return [item for item in items if item]
+
+
+_ENDS_A_SELECT_LIST = frozenset(
+    {"from", "where", "group", "order", "having", "limit", "offset", "union", "intersect", "except"}
+)
+"""Words that close a select list. Reached only at paren depth zero, so a
+``CAST(x AS text)`` or a scalar subquery inside an item does not end it."""
+
+
+def _is_name(word: str) -> bool:
+    """Whether a word is an identifier rather than punctuation."""
+    return bool(word) and (word[0].isalpha() or word[0] == "_")
+
+
+_ALIASABLE_TAIL = 2
+"""An implicit alias needs the aliased thing in front of it."""
+
+
+def _alias_of(item: Sequence[str]) -> str | None:
+    """The name one select item comes back under, when it renames itself.
+
+    ``None`` when the item is a bare column or an unaliased expression: the
+    driver names those after the expression text, so the sensitive part appears
+    in the name and ordinary masking already covers them.
+    """
+    lowered = [word.lower() for word in item]
     depth = 0
-    for back in range(end, -1, -1):
-        if tokens[back] == ")":
+    for position, word in enumerate(item):
+        if word == "(":
             depth += 1
-        elif tokens[back] == "(":
+        elif word == ")":
             depth -= 1
-            if depth == 0:
-                return list(tokens[back + 1 : end])
-    return list(tokens[:end])  # pragma: no cover - unbalanced parens
+        elif depth == 0 and lowered[position] == "as" and position + 1 < len(item):
+            # Not a CAST's `as`, which sits inside parentheses.
+            return item[position + 1]
+    if len(item) < _ALIASABLE_TAIL or not _is_name(item[-1]):
+        return None
+    # `password_hash notes` and `substr(password_hash,1,3) frag`: the keyword is
+    # optional, and leaving it out renames the column just the same.
+    if _is_name(item[-2]) or item[-2] == ")":
+        return item[-1]
+    return None
 
 
 def is_sensitive(column: str) -> bool:
