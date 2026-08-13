@@ -405,3 +405,73 @@ def test_the_driver_protocol_is_satisfied_by_the_fake() -> None:
     assert callable(fake.navigate)
     with pytest.raises(BrowserError):
         fake.snapshot()
+
+
+def test_cdp_nodes_become_the_tree_the_builder_expects() -> None:
+    """``page.accessibility`` was removed and the pin allows every version without it.
+
+    So the toolset's cheapest and most-used tool raised ``AttributeError`` on any
+    current install. The fallback reads the same data from CDP, which is what that
+    API wrapped -- but CDP reports one flat list plus ``childIds``, and the tree
+    builder wants the nesting.
+    """
+    from harness_agentic.browser.driver import _nest
+
+    nodes = [
+        {
+            "nodeId": "1",
+            "role": {"value": "RootWebArea"},
+            "name": {"value": "Orders"},
+            "childIds": ["2", "3"],
+        },
+        {
+            "nodeId": "2",
+            "role": {"value": "heading"},
+            "name": {"value": "Order 1001"},
+            "childIds": [],
+        },
+        {
+            "nodeId": "3",
+            "role": {"value": "generic"},
+            "name": {"value": ""},
+            "childIds": ["4"],
+            "ignored": True,
+        },
+        {"nodeId": "4", "role": {"value": "button"}, "name": {"value": "Check"}, "childIds": []},
+    ]
+
+    tree = _nest(nodes)
+
+    assert tree["role"] == "RootWebArea"
+    assert tree["name"] == "Orders"
+    assert [child["name"] for child in tree["children"]] == ["Order 1001", ""]
+    # An ignored wrapper keeps its children; the builder collapses it later.
+    wrapper = tree["children"][1]
+    assert wrapper["role"] == ""
+    assert wrapper["children"][0]["name"] == "Check"
+
+
+def test_a_cycle_in_the_tree_does_not_recurse_forever() -> None:
+    # A malformed tree can point back at itself, and a browser is untrusted input.
+    from harness_agentic.browser.driver import _nest
+
+    tree = _nest(
+        [
+            {"nodeId": "1", "role": {"value": "a"}, "name": {"value": ""}, "childIds": ["2"]},
+            {"nodeId": "2", "role": {"value": "b"}, "name": {"value": ""}, "childIds": ["1"]},
+        ]
+    )
+    assert tree["role"] in ("a", "b", "document")
+
+
+def test_several_roots_are_wrapped_in_a_document() -> None:
+    from harness_agentic.browser.driver import _nest
+
+    tree = _nest(
+        [
+            {"nodeId": "1", "role": {"value": "a"}, "name": {"value": ""}, "childIds": []},
+            {"nodeId": "9", "role": {"value": "b"}, "name": {"value": ""}, "childIds": []},
+        ]
+    )
+    assert tree["role"] == "document"
+    assert [child["role"] for child in tree["children"]] == ["a", "b"]

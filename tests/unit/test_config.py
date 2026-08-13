@@ -227,3 +227,61 @@ def test_every_settable_key_is_discoverable(home: Path) -> None:
     assert "docker.network" in keys
     assert "skills.autonomy" in keys
     assert "gateway.allow_all" in keys
+
+
+def test_the_toolsets_that_need_a_resource_are_absent_without_one(tmp_path: Path) -> None:
+    """`data`, `retrieval` and `browser` had no configuration at all.
+
+    So no surface could supply a database, a corpus or a driver, and asking for
+    those toolsets got an agent with nothing in them -- the tools existed and
+    were unreachable, the same shape as MCP. Absent rather than present-and-
+    failing is the right default: an agent offered a tool that can only error
+    will try it.
+    """
+    from harness_agentic.cli.chat import _browser, _http_fetcher, _retriever, _sql_source
+
+    empty = load_settings(workspace=tmp_path).settings
+    assert _sql_source(empty) is None
+    assert _retriever(empty) is None
+    assert _http_fetcher(empty) is None
+    assert _browser(empty) is None
+
+
+def test_a_configured_database_and_corpus_are_opened(tmp_path: Path) -> None:
+    import sqlite3
+
+    from harness_agentic.cli.chat import _http_fetcher, _retriever, _sql_source
+    from harness_agentic.data.kb import SqliteKnowledgeBase, chunk_document
+
+    database = tmp_path / "app.db"
+    sqlite3.connect(database).executescript("CREATE TABLE t(id INTEGER);")
+    index = tmp_path / "kb.sqlite"
+    kb = SqliteKnowledgeBase(path=index)
+    kb.index(chunk_document("# Refunds\n\nWithin 30 days.\n", doc_id="refunds.md"))
+    kb.close()
+
+    (tmp_path / CONFIG_FILENAME).parent.mkdir(parents=True, exist_ok=True)
+    project = tmp_path / ".harness"
+    project.mkdir(exist_ok=True)
+    (project / CONFIG_FILENAME).write_text(
+        f'[data]\ndatabase = "{database}"\nhttp_allowlist = ["api.example.test"]\n'
+        f'[retrieval]\nindex = "{index}"\n',
+        encoding="utf-8",
+    )
+    settings = load_settings(workspace=tmp_path).settings
+
+    assert _sql_source(settings) is not None
+    assert _retriever(settings) is not None
+    assert _http_fetcher(settings) is not None
+
+
+def test_a_database_path_that_does_not_exist_is_reported_not_created(tmp_path: Path) -> None:
+    # SQLite would happily create an empty file, and the agent would then report
+    # truthfully and uselessly that the database has no tables.
+    from harness_agentic.cli.chat import _sql_source
+    from harness_agentic.config import Settings
+
+    missing = tmp_path / "nope.db"
+    settings = Settings.model_validate({"data": {"database": str(missing)}})
+    assert _sql_source(settings) is None
+    assert not missing.exists()

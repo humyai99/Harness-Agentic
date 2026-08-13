@@ -16,7 +16,7 @@ handling be tested without downloading a browser.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -105,6 +105,15 @@ class PlaywrightDriver:
     timeout_ms: int = DEFAULT_TIMEOUT_MS
     viewport: tuple[int, int] = DEFAULT_VIEWPORT
     user_agent: str = ""
+    executable_path: str = ""
+    """A Chromium to use instead of Playwright's own download.
+
+    Needed more often than it looks: an offline or air-gapped install has a
+    system Chromium and no way to fetch one, a container image may ship the
+    browser at a fixed path, and Playwright refuses to launch when its expected
+    build number and the installed one disagree -- which is a version mismatch,
+    not a missing browser, and the error it prints tells you to download again.
+    """
     _playwright: Any = None
     _browser: Any = None
     _page: Any = None
@@ -123,7 +132,9 @@ class PlaywrightDriver:
             raise BrowserError(detail) from exc
 
         self._playwright = sync_playwright().start()
-        self._browser = self._playwright.chromium.launch(headless=self.headless)
+        self._browser = self._playwright.chromium.launch(
+            headless=self.headless, executable_path=self.executable_path or None
+        )
         context = self._browser.new_context(
             viewport={"width": self.viewport[0], "height": self.viewport[1]},
             user_agent=self.user_agent or None,
@@ -186,10 +197,32 @@ class PlaywrightDriver:
     def snapshot(self) -> Snapshot:  # pragma: no cover - needs a real browser
         """Read the accessibility tree and mint fresh references."""
         page = self._require_page()
-        raw = page.accessibility.snapshot(interesting_only=True) or {}
-        built = self._builder.build(raw, url=page.url, title=page.title())
+        built = self._builder.build(self._tree(page), url=page.url, title=page.title())
         self._refs.replace(built.generation, self._locate(built))
         return built
+
+    def _tree(self, page: Any) -> dict[str, Any]:  # pragma: no cover - needs a browser
+        """The accessibility tree, as the nested ``role``/``name``/``children`` dict.
+
+        ``page.accessibility`` was removed from Playwright, and this project's pin
+        allows every version where it is gone -- so the toolset's cheapest and
+        most-used tool raised ``AttributeError`` on any current install. It is
+        still preferred when present, because someone pinned to an older
+        Playwright should not be broken by the fix.
+
+        The fallback goes to CDP, which is what that API wrapped: same data, same
+        shape once the flat node list is re-nested through ``childIds``.
+        """
+        legacy = getattr(page, "accessibility", None)
+        if legacy is not None:
+            snapshot: dict[str, Any] = legacy.snapshot(interesting_only=True) or {}
+            return snapshot
+        session = page.context.new_cdp_session(page)
+        try:
+            nodes = session.send("Accessibility.getFullAXTree").get("nodes", [])
+        finally:
+            session.detach()
+        return _nest(nodes)
 
     def _locate(self, snapshot: Snapshot) -> dict[str, Any]:  # pragma: no cover
         """Map each reference onto a Playwright locator.
@@ -235,11 +268,55 @@ class PlaywrightDriver:
         return str(self._require_page().url)
 
     def _require_page(self) -> Any:  # pragma: no cover - needs a real browser
-        """The open page, or a failure that says to start the browser."""
+        """The open page, launching Chromium on first use.
+
+        Started here rather than by whoever built the driver, because nobody did:
+        every browser tool failed with "the browser is not running" however the
+        driver was configured, so the toolset could not be used at all. Lazy is
+        also the right cost -- launching a browser is a second and a few hundred
+        megabytes, and a session that never browses should not pay it.
+        """
         if self._page is None:
-            detail = "the browser is not running"
+            self.start()
+        if self._page is None:  # pragma: no cover - start() raises rather than no-op
+            detail = "the browser did not start"
             raise BrowserError(detail)
         return self._page
+
+
+def _nest(nodes: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Re-nest CDP's flat accessibility nodes into ``role``/``name``/``children``.
+
+    CDP reports one list plus ``childIds``; the tree builder wants the nesting.
+    Ignored nodes are kept as bare wrappers rather than dropped, because their
+    children are usually the interesting part and the builder already collapses a
+    wrapper into what it contains.
+    """
+    by_id = {str(node.get("nodeId")): node for node in nodes}
+    referenced = {str(child) for node in nodes for child in (node.get("childIds") or [])}
+    roots = [str(node.get("nodeId")) for node in nodes if str(node.get("nodeId")) not in referenced]
+
+    def convert(node_id: str, seen: frozenset[str]) -> dict[str, Any] | None:
+        node = by_id.get(node_id)
+        if node is None or node_id in seen:
+            return None  # a cycle, which a malformed tree can contain
+        onwards = seen | {node_id}
+        children = [
+            built
+            for child in (node.get("childIds") or [])
+            if (built := convert(str(child), onwards)) is not None
+        ]
+        ignored = bool(node.get("ignored"))
+        return {
+            "role": "" if ignored else str((node.get("role") or {}).get("value") or ""),
+            "name": "" if ignored else str((node.get("name") or {}).get("value") or ""),
+            "children": children,
+        }
+
+    built = [node for root in roots if (node := convert(root, frozenset())) is not None]
+    if len(built) == 1:
+        return built[0]
+    return {"role": "document", "name": "", "children": built}
 
 
 @dataclass

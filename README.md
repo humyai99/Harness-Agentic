@@ -86,6 +86,50 @@ is one model response, `tool:` calls a tool and `text:` answers:
 python -c "import harness_agentic.testing.scenario as s; print(s.BUNDLED / 'tour.yaml')"
 ```
 
+## Point it at a database, a corpus, or a browser
+
+Three toolsets need something to work on, and appear only once they have it —
+an agent offered a tool that can only fail will try it. In
+`~/.harness/config.toml`:
+
+```toml
+[data]
+database = "~/work/app.db"          # sql_schema, sql_query -- read-only, twice over
+http_allowlist = ["api.example.test"]   # http_request, allowlist-only
+
+[retrieval]
+index = "~/.harness/kb/index.sqlite"    # kb_search
+
+[browser]
+enabled = true                       # browser_navigate, _snapshot, _click, _type
+```
+
+Columns whose names look like credentials never leave the database:
+`SELECT * FROM users` comes back with `<redacted:api_key>` and says which columns
+were masked. Renaming one to hide it is refused rather than masked, with or
+without the `AS`.
+
+Build the corpus first — `kb_search` has nothing to read until you do:
+
+```bash
+harn kb index ./docs        # writes ~/.harness/kb/index.sqlite
+harn kb list                # which documents, and how many passages each
+harn kb search "refunds"    # the same query the agent runs, without a model
+```
+
+The browser is off by default: it is arbitrary code execution with a network
+connection. It refuses loopback, private ranges and the cloud metadata service
+like every other fetch — an internal deployment that needs those sets
+`allow_private` and, better, names the hosts:
+
+```toml
+[browser]
+enabled = true
+allowed_hosts = ["dashboard.internal"]
+allow_private = true
+executable_path = "/usr/bin/chromium"   # for an offline install, or a version mismatch
+```
+
 ## Use a real model
 
 ```bash

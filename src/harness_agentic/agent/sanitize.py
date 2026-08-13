@@ -149,11 +149,22 @@ def _repair_arguments(messages: list[Message], counts: dict[str, int]) -> list[M
                     parsed = json.loads(block.raw_arguments)
                 except ValueError:
                     parsed = None
-                if isinstance(parsed, dict):
-                    blocks.append(replace(block, arguments=parsed, raw_arguments=None))
-                else:
-                    blocks.append(replace(block, arguments={}, raw_arguments=None))
-                counts["repaired_arguments"] += 1
+                recovered = parsed if isinstance(parsed, dict) else {}
+                blocks.append(replace(block, arguments=recovered, raw_arguments=None))
+                # Counted only when something was actually salvaged or lost. A
+                # tool that takes no arguments arrives as the string "{}", which
+                # parses to exactly the empty dict already there -- so every
+                # no-argument call was reported as a repaired history, on every
+                # turn, for the life of the session. "history repaired" is the
+                # line that matters when something is genuinely damaged, and a
+                # version of it that fires constantly is one nobody reads.
+                if not isinstance(parsed, dict) or parsed != block.arguments:
+                    # Reported unless the raw text parsed to a mapping that
+                    # agrees with what was already there. Anything else lost or
+                    # changed what the model meant to send -- including raw text
+                    # that parsed to a list, where the arguments are silently
+                    # discarded and the result looks identical to the benign case.
+                    counts["repaired_arguments"] += 1
                 changed = True
                 continue
             blocks.append(block)

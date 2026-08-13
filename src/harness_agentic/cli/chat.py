@@ -18,20 +18,29 @@ from typing import TYPE_CHECKING
 import typer
 
 from harness_agentic.agent.build import AgentBundle, build_agent
+from harness_agentic.browser.driver import PlaywrightDriver
 from harness_agentic.cli.events import ConsoleRenderer
 from harness_agentic.cli.memory import memory_store
 from harness_agentic.cli.render import console, err_console
 from harness_agentic.config import ConfigError, Settings, load_settings
 from harness_agentic.constants import ensure_dirs
+from harness_agentic.data.kb import SqliteKnowledgeBase
+from harness_agentic.data.sql import SqliteSource
 from harness_agentic.errors import CredentialError, HarnessError
 from harness_agentic.mcp.config import McpConfigError, configured_servers
+from harness_agentic.net.fetch import HttpFetcher
+from harness_agentic.net.policy import UrlPolicy
 from harness_agentic.skills.proposals import autonomy_from, default_store
 from harness_agentic.tools.approval import ApprovalPolicy, Mode
 from harness_agentic.tools.paths import looks_like_secret
 
 if TYPE_CHECKING:
+    from harness_agentic.browser.driver import Driver
+    from harness_agentic.data.kb import Retriever
+    from harness_agentic.data.sql import SqlSource
     from harness_agentic.envs.base import ExecEnvironment
     from harness_agentic.mcp.stdio import ServerConfig
+    from harness_agentic.net.fetch import Fetcher
     from harness_agentic.skills.proposals import ProposalStore
 
 if TYPE_CHECKING:
@@ -252,12 +261,84 @@ def _build(
             memory=memory_store(settings),
             mcp_servers=_mcp_servers(),
             proposal_store=_proposal_store(settings),
+            sql_source=_sql_source(settings),
+            retriever=_retriever(settings),
+            http_fetcher=_http_fetcher(settings),
+            browser=_browser(settings),
             max_iterations=settings.model.max_iterations,
         )
     except CredentialError as exc:
         err_console.print(f"[red]{exc}[/]")
         sys.exit(1)
     return bundle, renderer
+
+
+def _sql_source(settings: Settings) -> SqlSource | None:
+    """The database ``sql_query`` reads, when one is configured.
+
+    ``None`` when it is not, so the ``data`` toolset simply has no SQL tools
+    rather than offering ones that can only fail. A path that does not exist is
+    reported rather than opened: SQLite would create an empty file and the agent
+    would then report, truthfully and uselessly, that the database has no tables.
+    """
+    if not settings.data.database:
+        return None
+    path = Path(settings.data.database).expanduser()
+    if not path.is_file():
+        err_console.print(f"[yellow]data.database does not exist:[/] {path}")
+        return None
+    return SqliteSource(path=path, name=settings.data.database_name)
+
+
+def _retriever(settings: Settings) -> Retriever | None:
+    """The corpus ``kb_search`` answers from, when one has been indexed."""
+    if not settings.retrieval.index:
+        return None
+    path = Path(settings.retrieval.index).expanduser()
+    if not path.is_file():
+        err_console.print(
+            f"[yellow]retrieval.index does not exist:[/] {path} -- run `harn kb index <dir>`"
+        )
+        return None
+    return SqliteKnowledgeBase(path=path)
+
+
+def _http_fetcher(settings: Settings) -> Fetcher | None:
+    """The client ``http_request`` calls through, restricted to named hosts.
+
+    Deliberately a *separate* policy from ``web_fetch``'s. Reading a page is
+    broad and idempotent; calling an API is narrow and can change something, so
+    this one is allowlist-only and absent until the allowlist is.
+    """
+    if not settings.data.http_allowlist:
+        return None
+    return HttpFetcher(policy=UrlPolicy(allowed_hosts=frozenset(settings.data.http_allowlist)))
+
+
+def _browser(settings: Settings) -> Driver | None:
+    """A real browser, when the operator has switched one on.
+
+    Off unless asked for: a browser is arbitrary code execution with a network
+    connection. Constructed but not started -- the driver launches Chromium on
+    first use and says what to install if the extra is missing, which is a better
+    error than a failed session.
+    """
+    if not settings.browser.enabled:
+        return None
+    if settings.browser.allow_private and not settings.browser.allowed_hosts:
+        err_console.print(
+            "[yellow]browser.allow_private is on with no allowed_hosts:[/] the agent can "
+            "reach loopback, your private network and the cloud metadata service."
+        )
+    return PlaywrightDriver(
+        policy=UrlPolicy(
+            allow_private=settings.browser.allow_private,
+            allowed_hosts=frozenset(settings.browser.allowed_hosts),
+        ),
+        headless=settings.browser.headless,
+        timeout_ms=settings.browser.timeout_ms,
+        executable_path=settings.browser.executable_path,
+    )
 
 
 def _proposal_store(settings: Settings) -> ProposalStore | None:

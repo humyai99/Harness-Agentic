@@ -105,6 +105,60 @@ class MemorySettings(BaseModel):
     user_limit: int = Field(USER_LIMIT, gt=0)
 
 
+class DataSettings(BaseModel):
+    """A database to read, and the APIs that may be called."""
+
+    model_config = STRICT
+
+    database: str = ""
+    """Path to a SQLite file. Empty means no ``sql_query`` tool at all -- the
+    toolset appears only when there is something for it to read, so an agent is
+    never offered a tool that can only fail."""
+    database_name: str = "db"
+    """What the agent calls it, in the schema description and the tool result."""
+    http_allowlist: tuple[str, ...] = ()
+    """Hosts ``http_request`` may reach. Empty means no ``http_request``: a tool
+    that can call anything the model names is an outbound channel, and the narrow
+    allowlist is the whole reason it is a separate policy from ``web_fetch``."""
+
+
+class RetrievalSettings(BaseModel):
+    """A corpus to answer from."""
+
+    model_config = STRICT
+
+    index: str = ""
+    """Path to the FTS5 index built by ``harn kb index``. Empty means no
+    ``kb_search``."""
+
+
+class BrowserSettings(BaseModel):
+    """Driving a real browser, when the extra is installed."""
+
+    model_config = STRICT
+
+    enabled: bool = False
+    """Off by default. A browser is arbitrary code execution with a network
+    connection, so switching it on is a decision somebody makes rather than a
+    default they inherit."""
+    headless: bool = True
+    timeout_ms: int = Field(15_000, gt=0)
+    allow_private: bool = False
+    """Permit loopback and private addresses. Off by default and worth staying
+    off: a browser that can reach ``169.254.169.254`` or an unauthenticated admin
+    port is the SSRF problem with a rendering engine attached. On for an internal
+    ops deployment where the dashboards *are* the private network, and then the
+    operator has written it down."""
+    allowed_hosts: tuple[str, ...] = ()
+    """When non-empty, the only hosts reachable at all. The stronger control:
+    naming three internal dashboards beats permitting a whole address range."""
+    executable_path: str = ""
+    """A Chromium to launch instead of Playwright's own download. For an offline
+    install with a system browser, or when Playwright's expected build number and
+    the installed one disagree -- which reports as a missing browser and is not
+    one."""
+
+
 class GatewaySettings(BaseModel):
     """Chat platforms, and who is allowed to talk to them."""
 
@@ -129,6 +183,9 @@ class Settings(BaseModel):
     docker: DockerSettings = Field(default_factory=DockerSettings)
     skills: SkillSettings = Field(default_factory=SkillSettings)
     memory: MemorySettings = Field(default_factory=MemorySettings)
+    data: DataSettings = Field(default_factory=DataSettings)
+    retrieval: RetrievalSettings = Field(default_factory=RetrievalSettings)
+    browser: BrowserSettings = Field(default_factory=BrowserSettings)
     gateway: GatewaySettings = Field(default_factory=GatewaySettings)
 
     def enabled_toolsets(self) -> list[str]:

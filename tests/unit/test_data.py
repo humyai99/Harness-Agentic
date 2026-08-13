@@ -456,3 +456,53 @@ def test_the_static_knowledge_base_scores_by_overlap() -> None:
     hits = kb.search("rollback script")
     assert hits[0].chunk.heading == "Rollbacks"
     assert kb.count() == 2
+
+
+def test_the_kb_commands_build_and_prune_an_index(tmp_path: Path) -> None:
+    """Without ``harn kb`` the retrieval toolset could never be used at all.
+
+    The index is an FTS5 database that has to be built from documents and nothing
+    built one, so a `retrieval.index` setting could only ever point at a file that
+    did not exist.
+    """
+    from typer.testing import CliRunner
+
+    from harness_agentic.cli.main import app
+
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "refunds.md").write_text("# Refunds\n\nWithin 30 days of delivery.\n", encoding="utf-8")
+    (docs / "shipping.md").write_text("# Shipping\n\nThree to five days.\n", encoding="utf-8")
+    index = tmp_path / "index.sqlite"
+    runner = CliRunner()
+
+    built = runner.invoke(app, ["kb", "index", str(docs), "--index", str(index)])
+    assert built.exit_code == 0, built.output
+    assert index.is_file()
+
+    listed = runner.invoke(app, ["kb", "list", "--index", str(index)])
+    assert "refunds.md" in listed.output
+    assert "shipping.md" in listed.output
+
+    found = runner.invoke(app, ["kb", "search", "refunds", "--index", str(index)])
+    assert found.exit_code == 0
+    assert "30 days" in found.output
+
+    dropped = runner.invoke(app, ["kb", "forget", "refunds.md", "--index", str(index)])
+    assert dropped.exit_code == 0
+    assert "refunds.md" not in runner.invoke(app, ["kb", "list", "--index", str(index)]).output
+
+
+def test_searching_a_missing_index_says_so_rather_than_making_one(tmp_path: Path) -> None:
+    # Opening a missing file would create an empty index, and every search would
+    # then report no matches -- which reads as "the corpus does not cover that".
+    from typer.testing import CliRunner
+
+    from harness_agentic.cli.main import app
+
+    absent = tmp_path / "nothing.sqlite"
+    result = CliRunner().invoke(app, ["kb", "search", "anything", "--index", str(absent)])
+
+    assert result.exit_code == 1
+    assert "no index" in result.output
+    assert not absent.exists()
