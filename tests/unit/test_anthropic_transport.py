@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from harness_agentic.core.secrets import Secret
 from harness_agentic.core.stream import (
     StreamAccumulator,
     StreamDone,
@@ -43,7 +44,9 @@ NOW = datetime(2026, 1, 1, tzinfo=UTC)
 def transport() -> AnthropicTransport:
     return AnthropicTransport(
         credentials=Credentials(
-            base_url="https://api.anthropic.com", api_key="sk-test", source="explicit"
+            base_url="https://api.anthropic.com",
+            api_key=Secret("sk-test", source="test"),
+            source="explicit",
         )
     )
 

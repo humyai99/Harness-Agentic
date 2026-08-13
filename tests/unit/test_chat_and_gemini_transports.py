@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from harness_agentic.core.secrets import Secret
 from harness_agentic.core.stream import StreamAccumulator
 from harness_agentic.core.types import (
     ImageBlock,
@@ -28,7 +29,9 @@ from harness_agentic.providers.transports.chat_completions import ChatCompletion
 from harness_agentic.providers.transports.gemini import GeminiTransport
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
-CREDS = Credentials(base_url="https://example.invalid", api_key="k", source="explicit")
+CREDS = Credentials(
+    base_url="https://example.invalid", api_key=Secret("k", source="test"), source="explicit"
+)
 
 SCHEMA = ToolSchema(
     name="read_file",
@@ -315,8 +318,30 @@ def test_function_calls_arrive_whole_in_one_frame(gemini: GeminiTransport) -> No
 
 
 def test_the_api_key_travels_in_a_header_not_the_url(gemini: GeminiTransport) -> None:
-    """A key in a URL ends up in proxy logs and error messages."""
-    assert gemini.credentials.api_key == "k"
+    """A key in a URL ends up in proxy logs and error messages.
+
+    Asserted against the client the transport actually built. The old version
+    checked that the credentials object still held the key, which is true
+    whichever way the key is sent and so could not fail.
+    """
+    assert gemini._client.headers["x-goog-api-key"] == "k"
+    assert "k" not in str(gemini._client.base_url)
+
+
+def test_credentials_do_not_print_the_key(gemini: GeminiTransport) -> None:
+    """The field is a Secret so that this holds by construction.
+
+    It was documented as a Secret and typed as ``str``, so the dataclass's
+    generated repr put the key in full into any log line, exception, or bug
+    report that happened to render it -- and the docstring told every reader
+    that could not happen.
+    """
+    rendered = f"{gemini.credentials!r} {gemini.credentials}"
+    assert "k" not in rendered.replace("Secret", "").replace("api_key", "")
+    assert "***" in rendered
+    # Still reachable where it is genuinely needed, and greppable when it is.
+    assert gemini.credentials.api_key is not None
+    assert gemini.credentials.api_key.reveal() == "k"
 
 
 @pytest.mark.parametrize(

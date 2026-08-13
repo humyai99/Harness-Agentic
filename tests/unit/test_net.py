@@ -17,6 +17,7 @@ from typing import Any
 import httpx
 import pytest
 
+from harness_agentic.core.secrets import Secret
 from harness_agentic.net.extract import extract, to_text
 from harness_agentic.net.fetch import FetchResult, HttpFetcher, RecordedFetcher
 from harness_agentic.net.policy import (
@@ -26,7 +27,7 @@ from harness_agentic.net.policy import (
     internal_reason,
 )
 from harness_agentic.net.search import BraveSearch, SearchHit, StaticSearch, from_environment
-from harness_agentic.providers.credentials import Secret, SecretResolver
+from harness_agentic.providers.credentials import SecretResolver
 
 
 def resolving(**mapping: str) -> Any:

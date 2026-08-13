@@ -20,6 +20,7 @@ from typing import Any
 import httpx
 import pytest
 
+from harness_agentic.core.secrets import Secret
 from harness_agentic.errors import AdapterError
 from harness_agentic.gateway.platforms import load
 from harness_agentic.gateway.platforms.fake import FakeAdapter, line_like
@@ -27,7 +28,6 @@ from harness_agentic.gateway.platforms.line import LineAdapter
 from harness_agentic.gateway.platforms.telegram import TelegramAdapter, escape_markdown_v2
 from harness_agentic.gateway.types import ChatKind, DeliveryTarget, OutboundMessage, Transport
 from harness_agentic.gateway.webserver import WebhookApp
-from harness_agentic.providers.credentials import Secret
 
 CHANNEL_SECRET = "line-channel-secret"
 

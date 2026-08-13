@@ -97,7 +97,7 @@ class ChatCompletionsTransport(ProviderTransport):
         self._clock = clock or SystemClock()
         headers = {"content-type": "application/json", **dict(credentials.extra_headers)}
         if credentials.api_key:
-            headers["authorization"] = f"Bearer {credentials.api_key}"
+            headers["authorization"] = f"Bearer {credentials.api_key.reveal()}"
         self._client = build_client(
             base_url=credentials.base_url, headers=headers, timeout_s=timeout_s
         )

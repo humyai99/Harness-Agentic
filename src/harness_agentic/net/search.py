@@ -26,8 +26,9 @@ from harness_agentic.net.policy import UrlPolicy
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from harness_agentic.core.secrets import Secret
     from harness_agentic.net.fetch import Fetcher
-    from harness_agentic.providers.credentials import Secret, SecretResolver
+    from harness_agentic.providers.credentials import SecretResolver
 
 log = logging.getLogger(__name__)
 

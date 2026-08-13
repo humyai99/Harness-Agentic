@@ -22,6 +22,7 @@ from typing import Any
 
 import pytest
 
+from harness_agentic.core.secrets import Secret
 from harness_agentic.core.stream import StreamAccumulator, StreamDone, UsageUpdate
 from harness_agentic.core.types import (
     Message,
@@ -49,7 +50,11 @@ from harness_agentic.testing import FakeTransport
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
-CREDENTIALS = Credentials(base_url="https://example.invalid", api_key="k", source="explicit")
+CREDENTIALS = Credentials(
+    base_url="https://example.invalid",
+    api_key=Secret("k", source="test"),
+    source="explicit",
+)
 
 TRANSPORTS: dict[str, Callable[[], ProviderTransport]] = {
     "anthropic": lambda: AnthropicTransport(credentials=CREDENTIALS),

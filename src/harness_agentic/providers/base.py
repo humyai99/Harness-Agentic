@@ -32,6 +32,7 @@ from harness_agentic.core.types import (
 from harness_agentic.errors import MalformedResponse, ProviderError
 
 if TYPE_CHECKING:
+    from harness_agentic.core.secrets import Secret
     from harness_agentic.core.stream import StreamEvent
     from harness_agentic.providers.catalog import TransportFeature
 
@@ -54,13 +55,15 @@ class ReasoningConfig:
 class Credentials:
     """Resolved credentials for one provider.
 
-    ``api_key`` is typed as :class:`~harness_agentic.config.secrets.Secret` at
-    the call site rather than ``str`` so that mypy stops a raw key from
-    reaching a log statement or an f-string.
+    ``api_key`` is a :class:`~harness_agentic.core.secrets.Secret` rather than a
+    ``str`` so that mypy stops a raw key from reaching a log statement or an
+    f-string. It was documented as one and typed as the other, which is the
+    worst of both: this dataclass's generated ``__repr__`` printed the key in
+    full, and the docstring told every reader it could not.
     """
 
     base_url: str
-    api_key: str | None = None
+    api_key: Secret | None = None
     source: CredentialSource = "none"
     extra_headers: Mapping[str, str] = field(default_factory=dict)
 

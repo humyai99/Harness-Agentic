@@ -43,7 +43,7 @@ from harness_agentic.gateway.types import (
 )
 
 if TYPE_CHECKING:
-    from harness_agentic.providers.credentials import Secret
+    from harness_agentic.core.secrets import Secret
 
 log = logging.getLogger(__name__)
 

@@ -22,6 +22,7 @@ from typing import Any
 import httpx
 import pytest
 
+from harness_agentic.core.secrets import Secret
 from harness_agentic.errors import AdapterError
 from harness_agentic.gateway.keys import build_session_key
 from harness_agentic.gateway.platforms.discord import (
@@ -35,7 +36,6 @@ from harness_agentic.gateway.platforms.discord import (
 )
 from harness_agentic.gateway.platforms.slack import SlackAdapter, to_mrkdwn
 from harness_agentic.gateway.types import ChatKind, DeliveryTarget, OutboundMessage, SentRef
-from harness_agentic.providers.credentials import Secret
 
 SIGNING_SECRET = "slack-signing-secret"
 BOT = "UBOT01"

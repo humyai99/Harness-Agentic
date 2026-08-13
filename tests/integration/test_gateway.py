@@ -24,6 +24,7 @@ import pytest
 
 from harness_agentic.agent.build import AgentBundle, build_agent
 from harness_agentic.core.events import EventSink
+from harness_agentic.core.secrets import Secret
 from harness_agentic.errors import AuthError
 from harness_agentic.gateway.authz import Authorizer, PlatformAuth
 from harness_agentic.gateway.platforms.fake import FakeAdapter, line_like, telegram_like
@@ -32,7 +33,6 @@ from harness_agentic.gateway.ratelimit import Limit, RateLimiter
 from harness_agentic.gateway.router import Router
 from harness_agentic.gateway.service import Gateway
 from harness_agentic.gateway.types import ChatKind, MessageEvent
-from harness_agentic.providers.credentials import Secret
 from harness_agentic.testing import FakeTransport, ScriptedTurn, text_turn, tool_turn
 from harness_agentic.tools.approval import ApprovalPolicy, Mode
 

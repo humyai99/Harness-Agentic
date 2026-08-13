@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from harness_agentic.core.secrets import Secret
 from harness_agentic.errors import Unauthorized
 from harness_agentic.gateway.authz import Authorizer, PlatformAuth
 from harness_agentic.gateway.dedupe import Deduplicator
@@ -24,7 +25,6 @@ from harness_agentic.gateway.keys import KeyPolicy, build_session_key, parse_ses
 from harness_agentic.gateway.ratelimit import Limit, RateLimiter
 from harness_agentic.gateway.signature import verify_line, verify_slack
 from harness_agentic.gateway.types import ChatKind, MessageEvent, Sender
-from harness_agentic.providers.credentials import Secret
 
 NOW = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
 

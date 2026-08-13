@@ -49,3 +49,40 @@ def redact_credentials(text: str) -> str:
     for pattern, replacement in CREDENTIAL_PATTERNS:
         text = pattern.sub(replacement, text)
     return text
+
+
+class Secret:
+    """A credential that will not print itself.
+
+    ``__repr__`` and ``__str__`` both redact, so an accidental f-string in a log
+    line yields ``Secret(***)`` rather than an API key in a file that may be
+    shipped to a log aggregator. Typing a field as ``Secret`` rather than ``str``
+    is what makes that guarantee hold: reaching the value takes a call to
+    :meth:`reveal`, which is greppable and reviewable, and mypy refuses the
+    shortcut.
+
+    Lives here rather than beside the resolver because
+    :class:`~harness_agentic.providers.base.Credentials` has to name this type,
+    and the resolver imports ``Credentials``.
+    """
+
+    __slots__ = ("_value", "source")
+
+    def __init__(self, value: str, *, source: str) -> None:
+        """Wrap ``value``, recording where it came from."""
+        self._value = value
+        self.source = source
+
+    def reveal(self) -> str:
+        """Return the raw value. Call this only at the point of use."""
+        return self._value
+
+    def __repr__(self) -> str:
+        """Redacted."""
+        return f"Secret(***, source={self.source!r})"
+
+    __str__ = __repr__
+
+    def __bool__(self) -> bool:
+        """Whether a value is present."""
+        return bool(self._value)

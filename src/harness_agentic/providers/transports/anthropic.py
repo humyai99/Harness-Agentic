@@ -100,7 +100,7 @@ class AnthropicTransport(ProviderTransport):
         self._client = build_client(
             base_url=credentials.base_url or "https://api.anthropic.com",
             headers={
-                "x-api-key": credentials.api_key or "",
+                "x-api-key": credentials.api_key.reveal() if credentials.api_key else "",
                 "anthropic-version": API_VERSION,
                 "content-type": "application/json",
                 **dict(credentials.extra_headers),

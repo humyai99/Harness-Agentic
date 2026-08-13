@@ -94,7 +94,7 @@ class GeminiTransport(ProviderTransport):
         if credentials.api_key:
             # Header rather than a query parameter: a key in a URL ends up in
             # proxy logs, browser history, and error messages.
-            headers["x-goog-api-key"] = credentials.api_key
+            headers["x-goog-api-key"] = credentials.api_key.reveal()
         self._client = build_client(
             base_url=credentials.base_url or "https://generativelanguage.googleapis.com/v1beta",
             headers=headers,

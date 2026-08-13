@@ -14,42 +14,13 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from harness_agentic.constants import harness_home, profile_dir
+from harness_agentic.core.secrets import Secret
 from harness_agentic.errors import CredentialError, InsecureCredentialFile
 from harness_agentic.providers.base import Credentials, CredentialSource
 from harness_agentic.providers.catalog import ProviderInfo, provider_info
 
 _QUOTED_MIN = 2
 """Shortest string that can be a matched pair of quotes."""
-
-
-class Secret:
-    """A credential that will not print itself.
-
-    ``__repr__`` and ``__str__`` both redact, so an accidental f-string in a
-    log line yields ``Secret(***)`` rather than an API key in a file that may
-    be shipped to a log aggregator.
-    """
-
-    __slots__ = ("_value", "source")
-
-    def __init__(self, value: str, *, source: str) -> None:
-        """Wrap ``value``, recording where it came from."""
-        self._value = value
-        self.source = source
-
-    def reveal(self) -> str:
-        """Return the raw value. Call this only at the point of use."""
-        return self._value
-
-    def __repr__(self) -> str:
-        """Redacted."""
-        return f"Secret(***, source={self.source!r})"
-
-    __str__ = __repr__
-
-    def __bool__(self) -> bool:
-        """Whether a value is present."""
-        return bool(self._value)
 
 
 class SecretResolver:
@@ -158,7 +129,7 @@ def resolve_credentials(
 
     return Credentials(
         base_url=base_url,
-        api_key=secret.reveal() if secret else None,
+        api_key=secret,
         source=_source_of(secret),
         extra_headers=info.quirks.extra_headers,
     )

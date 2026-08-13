@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING
 from harness_agentic.errors import Unauthorized
 
 if TYPE_CHECKING:
-    from harness_agentic.providers.credentials import Secret
+    from harness_agentic.core.secrets import Secret
 
 MAX_SKEW_S = 300.0
 """Slack's own recommendation, and a sane default for anyone else."""
