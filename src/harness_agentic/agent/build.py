@@ -1,0 +1,426 @@
+"""Assembling a runnable agent from configuration.
+
+Every surface -- the CLI now, the chat gateway and the web UI later -- builds
+its agent through this one function. Wiring duplicated per surface is how they
+drift apart, and then a fix applied to the terminal quietly fails to reach the
+LINE bot.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from pathlib import Path, PurePath
+from typing import TYPE_CHECKING
+
+from harness_agentic.agent.delegate import (
+    DelegationLimits,
+    Delegator,
+    install_delegate_tool,
+)
+from harness_agentic.agent.runner import AgentRunner, ModelChoice
+from harness_agentic.constants import harness_home, memories_dir
+from harness_agentic.core.cancel import CancelToken
+from harness_agentic.core.clock import Clock, SystemClock
+from harness_agentic.core.events import EventSink, Notice, ToolProgress, null_sink
+from harness_agentic.core.types import Message, TextBlock
+from harness_agentic.envs.local import LocalEnvironment
+from harness_agentic.mcp.bridge import McpBridge
+from harness_agentic.memory.budget import TokenBudget
+from harness_agentic.memory.compactor import (
+    SUMMARY_PROMPT,
+    ContextCompactor,
+    transcript_for_summary,
+)
+from harness_agentic.memory.manager import MemoryStore
+from harness_agentic.net.fetch import HttpFetcher
+from harness_agentic.net.search import from_environment
+from harness_agentic.prompts.builder import (
+    PromptBuilder,
+    identity_fragment,
+    memory_fragment,
+    skills_fragment,
+    tool_guidance_fragment,
+    volatile_fragment,
+    workspace_fragment,
+)
+from harness_agentic.providers.base import CompletionRequest
+from harness_agentic.providers.credentials import SecretResolver
+from harness_agentic.providers.resolver import TransportResolver
+from harness_agentic.session.sqlite_store import SqliteSessionStore
+from harness_agentic.skills.registry import SkillRegistry, default_roots
+from harness_agentic.tools.approval import ApprovalPolicy
+from harness_agentic.tools.builtin import builtin_registry
+from harness_agentic.tools.builtin.browser import install_browser_tools
+from harness_agentic.tools.builtin.data import (
+    install_http_tools,
+    install_kb_tools,
+    install_sql_tools,
+)
+from harness_agentic.tools.builtin.memory import install_memory_tools
+from harness_agentic.tools.builtin.session import install_session_tools
+from harness_agentic.tools.builtin.skills import install_skill_tools
+from harness_agentic.tools.builtin.web import install_web_tools
+from harness_agentic.tools.dispatch import ToolExecutor
+from harness_agentic.tools.registry import ToolRegistry
+
+if TYPE_CHECKING:
+    from harness_agentic.browser.driver import Driver
+    from harness_agentic.data.kb import Retriever
+    from harness_agentic.data.sql import SqlSource
+    from harness_agentic.envs.base import ExecEnvironment
+    from harness_agentic.mcp.stdio import ServerConfig
+    from harness_agentic.net.fetch import Fetcher
+    from harness_agentic.net.search import SearchProvider
+    from harness_agentic.providers.base import ProviderTransport
+    from harness_agentic.session.store import SessionStore
+    from harness_agentic.skills.proposals import ProposalStore
+    from harness_agentic.tools.registry import ToolRegistry
+    from harness_agentic.tools.spec import ApprovalRequest
+
+
+@dataclass
+class RunContext:
+    """The concrete :class:`~harness_agentic.tools.spec.ToolContext`."""
+
+    session_id: str
+    workspace_root: Path
+    cwd: PurePath
+    env: ExecEnvironment
+    cancel: CancelToken
+    surface: str = "cli"
+    emit: EventSink = null_sink
+    approval: ApprovalPolicy = field(default_factory=ApprovalPolicy)
+    _call_id: str = ""
+
+    def emit_progress(self, message: str) -> None:
+        """Report progress from inside a running tool."""
+        self.emit(ToolProgress(call_id=self._call_id, message=message))
+
+    def approve(self, request: ApprovalRequest) -> bool:
+        """Ask the policy. Kept on the context so tools can gate sub-steps."""
+        return self.approval.check(request).granted
+
+
+class _ContextAdapter:
+    """Bridges :class:`RunContext` onto the ToolContext protocol.
+
+    A view, not a copy. ``cancel`` in particular is read through on every access:
+    the runner swaps in a fresh token at the start of each turn, and an adapter
+    holding a snapshot would hand tools the previous turn's token -- which, once
+    a turn had been interrupted, meant every command the conversation ran after
+    that was killed the moment it started.
+    """
+
+    def __init__(self, inner: RunContext) -> None:
+        self._inner = inner
+        self.session_id = inner.session_id
+        self.workspace_root = inner.workspace_root
+        self.cwd = inner.cwd
+        self.env = inner.env
+        self.surface = inner.surface
+
+    @property
+    def cancel(self) -> CancelToken:
+        """The token for the turn in flight, whichever one that now is."""
+        return self._inner.cancel
+
+    @cancel.setter
+    def cancel(self, token: CancelToken) -> None:
+        self._inner.cancel = token
+
+    def emit(self, message: str) -> None:
+        """Forward a tool's progress line onto the event stream."""
+        self._inner.emit_progress(message)
+
+    def approve(self, request: ApprovalRequest) -> bool:
+        """Defer to the approval policy."""
+        return self._inner.approve(request)
+
+
+@dataclass
+class AgentBundle:
+    """A runner plus the pieces a surface needs to drive and inspect it."""
+
+    runner: AgentRunner
+    store: SessionStore
+    registry: ToolRegistry
+    context: RunContext
+    prompts: PromptBuilder
+    executor: ToolExecutor
+    """Exposed so a surface can read what ran, and whether anything it ran
+    brought untrusted content into the conversation."""
+    mcp: McpBridge | None = None
+    """The connected MCP servers, if any. A surface that owns this bundle owns
+    closing it -- an MCP server is a child process, and one left running after
+    the agent goes away is a leak the operator finds with `ps`."""
+
+
+def default_library(workspace: Path) -> SkillRegistry:
+    """The standard skill roots: bundled, then user, then this project's.
+
+    Later wins on a name collision, which is the ordering people already expect
+    from ``git config`` and ``.gitignore``: the repository's own version of a
+    procedure beats the one in your home directory, and both beat the bundled
+    one. The loser is recorded as shadowed rather than dropped so ``harn skills
+    doctor`` can explain why the file someone edited is not the one in use.
+    """
+    return SkillRegistry(
+        default_roots(
+            builtin=Path(__file__).parent.parent / "skills" / "bundled",
+            user=harness_home() / "skills",
+            project=workspace / ".harness" / "skills",
+        )
+    )
+
+
+def build_agent(  # noqa: PLR0912, PLR0915 - one wiring site; splitting spreads the wiring
+    *,
+    model: str,
+    workspace: Path,
+    sessions_dir: Path,
+    toolsets: Sequence[str] = ("file", "terminal"),
+    fetcher: Fetcher | None = None,
+    search: SearchProvider | None = None,
+    sql_source: SqlSource | None = None,
+    retriever: Retriever | None = None,
+    http_fetcher: Fetcher | None = None,
+    delegation: DelegationLimits | None = None,
+    mcp_servers: Sequence[ServerConfig] = (),
+    browser: Driver | None = None,
+    skills: SkillRegistry | None = None,
+    proposal_store: ProposalStore | None = None,
+    memory: MemoryStore | None = None,
+    env: ExecEnvironment | None = None,
+    surface: str = "cli",
+    emit: EventSink = null_sink,
+    approval: ApprovalPolicy | None = None,
+    clock: Clock | None = None,
+    fallbacks: Sequence[str] = (),
+    transports: dict[str, ProviderTransport] | None = None,
+    stream: bool = True,
+    max_iterations: int = 40,
+) -> AgentBundle:
+    """Wire up an agent ready to run turns.
+
+    ``transports`` lets a caller inject one -- which is how the whole stack is
+    exercised in tests with ``FakeTransport`` and no API key.
+
+    The ``data`` and ``retrieval`` tools appear only when the thing they read
+    from is supplied: no ``sql_query`` without a ``sql_source``, no ``kb_search``
+    without a ``retriever``, no ``http_request`` without an ``http_fetcher``.
+    That last one is separate from ``fetcher`` on purpose -- ``web_fetch`` wants
+    a broad policy with an internal-range denylist, and ``http_request`` wants a
+    narrow one with a host allowlist, because it can change what it calls.
+    """
+    the_clock = clock or SystemClock()
+    resolver = TransportResolver(clock=the_clock, overrides=transports)
+    chain = [
+        ModelChoice(transport=r.transport, model=r.model, provider=r.provider)
+        for r in resolver.chain(model, fallbacks)
+    ]
+
+    # Forked, not the process-wide registry: the session store and the HTTP
+    # fetcher installed below are this agent's, and a second agent in the same
+    # process must not inherit them.
+    tool_registry = builtin_registry()
+    store = SqliteSessionStore(sessions_dir / "state.db")
+    # Needs a live store, so it is registered here rather than at import time.
+    install_session_tools(tool_registry, store)
+    if "web" in toolsets:
+        # Only built when asked for. Opening an HTTP client and resolving a
+        # search key for an agent that will never fetch anything is waste, and
+        # the URL policy is deployment configuration a caller may want to
+        # narrow -- so a caller may pass its own fetcher instead.
+        install_web_tools(
+            tool_registry,
+            fetcher or HttpFetcher(),
+            search=search or from_environment(SecretResolver(), fetcher or HttpFetcher()),
+        )
+    if sql_source is not None:
+        install_sql_tools(tool_registry, sql_source)
+    if retriever is not None:
+        install_kb_tools(tool_registry, retriever)
+    if http_fetcher is not None:
+        install_http_tools(tool_registry, http_fetcher)
+    if browser is not None:
+        install_browser_tools(tool_registry, browser)
+
+    # Created here rather than after the tools, because the skill tools need the
+    # session id to record which conversation a proposal came out of.
+    session = store.create(source=surface, cwd=workspace, model=chain[0].model)
+
+    # The executor holds the taint flag and does not exist yet. A one-slot holder
+    # filled in below is what lets `skill_propose` read the flag as it stands at
+    # call time: a proposal filed after a web fetch in the same turn is tainted,
+    # even though nothing was tainted when the tools were wired.
+    executor_slot: list[ToolExecutor] = []
+
+    def session_is_tainted() -> bool:
+        return bool(executor_slot and executor_slot[0].tainted)
+
+    remembered = ""
+    if "memory" in toolsets:
+        # Defaults to a directory shared by every session in the profile, rather
+        # than a per-session one: memory that does not outlive the session is not
+        # memory. Profiles stay separate, though -- that is what they are for.
+        store_of_facts = memory if memory is not None else MemoryStore(memories_dir())
+        install_memory_tools(tool_registry, store_of_facts)
+        # Read once, here. Re-reading per turn would change the block mid-session
+        # and throw away the cached prefix for every remaining turn.
+        remembered = store_of_facts.snapshot()
+
+    skill_library: SkillRegistry | None = None
+    if "skill" in toolsets:
+        skill_library = skills if skills is not None else default_library(workspace)
+        skill_library.refresh()
+        install_skill_tools(
+            tool_registry,
+            skill_library,
+            # Without a place to review proposals there is no `skill_propose`: a
+            # queue nobody can read is the same as no queue, and the model would
+            # keep filing into it.
+            proposals=proposal_store,
+            session_id=session.id,
+            tainted=session_is_tainted,
+        )
+
+    bridge: McpBridge | None = None
+    if mcp_servers:
+        # Connected before the toolsets are resolved, because each server
+        # contributes its own `mcp:<name>` toolset and the agent has to be able
+        # to ask for it.
+        bridge = McpBridge(registry=tool_registry)
+        bridge.connect_all(mcp_servers)
+        for line in bridge.report():
+            emit(Notice("warning" if "FAILED" in line else "info", line))
+
+    mcp_toolsets = [f"mcp:{name}" for name in (bridge.servers if bridge else ())]
+    limits = delegation or DelegationLimits(allowed_toolsets=(*toolsets, *mcp_toolsets))
+    if limits.max_depth > 0:
+        # A child gets a fresh agent with the same wiring and one less level of
+        # depth. Building it lazily matters: an agent that never delegates must
+        # not pay for a second store and a second HTTP client.
+        def spawn(task: str, granted: Sequence[str], max_steps: int) -> AgentBundle:
+            del task  # the prompt is passed to run_turn, not to the constructor
+            return build_agent(
+                model=model,
+                workspace=workspace,
+                sessions_dir=sessions_dir,
+                toolsets=granted,
+                fetcher=fetcher,
+                search=search,
+                sql_source=sql_source,
+                retriever=retriever,
+                http_fetcher=http_fetcher,
+                # Bounded by what *this* child got, not by what the parent had:
+                # otherwise the intersection resets one level down.
+                delegation=limits.child(granted),
+                surface=surface,
+                emit=emit,
+                approval=approval,
+                clock=clock,
+                fallbacks=fallbacks,
+                transports=transports,
+                stream=stream,
+                max_iterations=max_steps,
+            )
+
+        install_delegate_tool(tool_registry, Delegator(factory=spawn, limits=limits))
+
+    # `core` is always on: an agent that cannot reach its own history has to
+    # guess at anything compaction summarized away.
+    active_toolsets = list(dict.fromkeys(["core", *toolsets, *mcp_toolsets]))
+    resolved_tools = tool_registry.resolve(enabled_toolsets=active_toolsets, surface=surface)
+
+    policy = approval or ApprovalPolicy(surface=surface)
+    # Injected, or local. The whole point of `ExecEnvironment` is that the tools
+    # do not know which they got -- so this is the one line that decides whether
+    # `terminal` runs on the host or in a container.
+    environment = env if env is not None else LocalEnvironment(workspace)
+    context = RunContext(
+        session_id=session.id,
+        workspace_root=workspace,
+        cwd=PurePath(environment.root),
+        env=environment,
+        cancel=CancelToken(),
+        surface=surface,
+        emit=emit,
+        approval=policy,
+    )
+
+    prompts = (
+        PromptBuilder()
+        .add(identity_fragment())
+        .add(tool_guidance_fragment(tool_registry.schemas(resolved_tools)))
+        .add(workspace_fragment(str(workspace)))
+        .add(
+            volatile_fragment(now=the_clock.now().isoformat(timespec="seconds"), cwd=str(workspace))
+        )
+    )
+    if remembered:
+        prompts.add(memory_fragment(remembered))
+    if skill_library is not None:
+        # A frozen snapshot: taken once here and never regenerated, so it stays
+        # byte-identical inside the cached prefix for the life of the session.
+        catalog = skill_library.catalog(tool.name for tool in resolved_tools)
+        if catalog.text.strip():
+            prompts.add(skills_fragment(catalog.text))
+            emit(Notice("info", f"skills: {len(catalog.included)} in the catalog"))
+        for problem in skill_library.problems():
+            # Reported, not swallowed. A malformed skill that vanishes silently is
+            # how a library rots without anyone noticing.
+            emit(Notice("warning", f"skill at {problem.path} did not load"))
+
+    # Summarize with the cheapest model in the chain rather than the primary:
+    # compaction happens on the longest conversations, which is exactly when
+    # paying top-tier rates to write a summary hurts most.
+    summary_choice = chain[-1]
+
+    def summarize(span: Sequence[Message]) -> str:
+        request = CompletionRequest(
+            model=summary_choice.model,
+            messages=(
+                Message(
+                    role="user",
+                    content=(TextBlock(f"{SUMMARY_PROMPT}\n\n{transcript_for_summary(span)}"),),
+                    created_at=the_clock.now(),
+                ),
+            ),
+            max_output_tokens=1024,
+            stream=False,
+        )
+        return summary_choice.transport.send(request).message.text()
+
+    executor = ToolExecutor(tool_registry, approval=policy, emit=emit)
+    executor_slot.append(executor)
+    primary = resolver.resolve(model)
+    runner = AgentRunner(
+        chain=chain,
+        registry=tool_registry,
+        executor=executor,
+        enabled_toolsets=active_toolsets,
+        budget=TokenBudget(
+            window=primary.info.context_window,
+            reserve_output=min(primary.info.max_output_tokens, 8192),
+        ),
+        compactor=ContextCompactor(summarize),
+        prompts=prompts,
+        store=store,
+        context=_ContextAdapter(context),
+        emit=emit,
+        clock=the_clock,
+        stream=stream,
+        max_iterations=max_iterations,
+    )
+    # The session the caller will run against; surfaces read it off the store.
+    context.session_id = session.id
+    return AgentBundle(
+        runner=runner,
+        store=store,
+        registry=tool_registry,
+        context=context,
+        prompts=prompts,
+        executor=executor,
+        mcp=bridge,
+    )

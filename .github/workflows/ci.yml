@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "claude/**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_FROZEN: "0"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras --dev
+      - run: uv run ruff check --output-format=github .
+      - run: uv run ruff format --check .
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras --dev
+      - run: uv run mypy src
+
+  invariants:
+    # The architectural checks run in CI too, not just pre-commit: a hook that
+    # only fires locally is a hook that a --no-verify commit walks straight past.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: tools must reach the filesystem through ExecEnvironment
+        run: |
+          shopt -s globstar nullglob
+          files=(src/harness_agentic/tools/**/*.py)
+          if [ ${#files[@]} -gt 0 ]; then
+            python3 scripts/check_io_boundary.py "${files[@]}"
+          fi
+      - name: the core is synchronous
+        run: |
+          shopt -s globstar nullglob
+          python3 scripts/check_async_boundary.py src/harness_agentic/**/*.py
+
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras --dev --python ${{ matrix.python }}
+      - run: uv run pytest -n auto --cov --cov-report=term-missing
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv build
+      # Catches import cycles and missing package data that a source-tree test
+      # run never sees, because it exercises the installed wheel.
+      - run: uvx --from ./dist/*.whl harn --version

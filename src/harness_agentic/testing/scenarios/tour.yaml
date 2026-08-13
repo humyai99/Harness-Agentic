@@ -1,0 +1,40 @@
+# A scripted tour of the agent loop, for the `fake/scripted` provider.
+#
+# This file is the model's half of a conversation, written down in advance.
+# Everything else is real: real tool dispatch against the real filesystem, real
+# approval policy, real session store, real prompt assembly. Only the model is
+# replaced -- so a failure while running this is a failure of the harness rather
+# than of the weather, and it needs no API key, no network, and no bill.
+#
+#   export HARNESS_FAKE_SCRIPT=tour        # a bundled scenario, by name
+#   harn run -m fake/scripted --toolsets file,memory --yes "have a look around"
+#
+# It works in any directory: it lists what is there, writes one clearly-named
+# file, reads it back, and records a fact. Delete harness-tour.md afterwards.
+#
+# Each entry under `turns:` is one model response. `tool:` calls a tool with
+# `arguments:`; `text:` answers. Copy this file to write your own.
+turns:
+  - text: Let me see where I am.
+    tool: list_dir
+    arguments: {path: "."}
+
+  - tool: write_file
+    arguments:
+      path: harness-tour.md
+      content: "Written by the agent during `harn run`. Safe to delete."
+
+  - tool: read_file
+    arguments: {path: harness-tour.md}
+
+  - tool: memory_add
+    arguments:
+      kind: memory
+      text: The harness tour ran here and left harness-tour.md behind.
+      section: Notes
+
+  - text: >
+      I listed the directory, wrote harness-tour.md, read it back to confirm it
+      landed, and recorded a note that will be in my prompt next session. Every
+      one of those was a real tool call against the real filesystem -- only the
+      model was scripted.

@@ -1,0 +1,45 @@
+default_language_version:
+  python: python3.11
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.6
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-toml
+      - id: check-yaml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: detect-private-key
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: mixed-line-ending
+
+  # These three encode the architecture's load-bearing invariants as machine
+  # checks. Architecture that is only written down decays by month three.
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy (strict, src only)
+        entry: uv run mypy src
+        language: system
+        pass_filenames: false
+        types: [python]
+
+      - id: no-raw-io-outside-envs
+        name: tools must reach the filesystem through ExecEnvironment
+        entry: python3 scripts/check_io_boundary.py
+        language: system
+        files: ^src/harness_agentic/tools/.*\.py$
+
+      - id: no-event-loop-outside-bridge
+        name: the core is synchronous; event loops belong to the bridge
+        entry: python3 scripts/check_async_boundary.py
+        language: system
+        files: ^src/harness_agentic/.*\.py$
